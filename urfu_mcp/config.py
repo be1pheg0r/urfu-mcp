@@ -26,7 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "client_id": None,
         "redirect_uri": "http://127.0.0.1:43123/callback",
         "person_id_claim": "person_id",
-        "token_kind": "id_token",
+        "token_kind": None,
         "callback_timeout_seconds": 300,
         "metadata_timeout_seconds": 10,
         "metadata_max_bytes": 1_000_000,
@@ -73,7 +73,7 @@ class AuthSettings(_Section):
     client_id: str | None = None
     redirect_uri: str = "http://127.0.0.1:43123/callback"
     person_id_claim: str = "person_id"
-    token_kind: str = "id_token"
+    token_kind: str | None = None
     callback_timeout_seconds: int = Field(default=300, ge=1, le=1800)
     metadata_timeout_seconds: float = Field(default=10, gt=0, le=60)
     metadata_max_bytes: int = Field(default=1_000_000, ge=1024, le=10_000_000)
@@ -95,7 +95,9 @@ class AuthSettings(_Section):
 
     @field_validator("token_kind")
     @classmethod
-    def token_kind_must_be_supported(cls, value: str) -> str:
+    def token_kind_must_be_supported(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if value not in {"id_token", "access_token"}:
             raise ValueError("token kind is unsupported")
         return value

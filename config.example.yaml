@@ -17,9 +17,9 @@ auth:
   # Имя claim в проверенном ID token, содержащего UUID person_id.
   # Сам UUID извлекается после входа и хранится в системном keyring.
   person_id_claim: person_id
-  # Какой токен передавать Modeus: id_token либо access_token.
-  # Совместимость выбранного типа токена нужно подтвердить для своего провайдера.
-  token_kind: id_token
+  # Выберите id_token либо access_token только после проверки контракта вашего API.
+  # null намеренно не выбирает токен; запуск без явного выбора завершится отказом.
+  token_kind: null
   # Максимальное ожидание локального callback авторизации, секунды (1–1800).
   callback_timeout_seconds: 300
   # Таймаут запроса OIDC metadata/JWKS, секунды (0–60).

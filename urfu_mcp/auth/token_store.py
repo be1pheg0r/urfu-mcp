@@ -65,7 +65,8 @@ class TokenStore:
             old_keys = {"access_token", "id_token", "token_type", "expires_at", "refresh_token"}
             if (
                 not isinstance(data, dict)
-                or set(data) not in {frozenset(old_keys), frozenset(old_keys | {"person_id"})}
+                or frozenset(data)
+                not in {frozenset(old_keys), frozenset(old_keys | {"person_id"})}
                 or not isinstance(data["access_token"], str)
                 or not data["access_token"]
                 or not isinstance(data["id_token"], str)

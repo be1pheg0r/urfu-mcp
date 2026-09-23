@@ -1,4 +1,4 @@
-"""Single-user stdio runtime composition for the existing Modeus tools."""
+"""Single-user stdio runtime for Modeus tools and fail-closed iStudent BRS."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from mcp.server import MCPServer
 
 from urfu_mcp.auth.token_store import TokenStore, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, load_config
+from urfu_mcp.istudent.auth import UnconfiguredIStudentSessionProvider
+from urfu_mcp.istudent.mcp_tools import register_brs_tool
 from urfu_mcp.modeus.authorization import ResolvedPersonAuthorizer
 from urfu_mcp.modeus.errors import NotAuthenticated
 from urfu_mcp.modeus.gateway import SfeduGateway
@@ -63,13 +65,16 @@ def build_server(
     client: httpx.AsyncClient | None = None,
 ) -> MCPServer:
     """Build the MCP server from YAML and authenticated identity in the keyring."""
+    token_kind = getattr(config.auth, "token_kind", None)
+    if token_kind not in {"id_token", "access_token"}:
+        raise NotAuthenticated("No supported Modeus token kind is configured")
     try:
         tokens = (token_store or create_token_store()).load()
     except Exception:  # noqa: BLE001 - keyring errors can contain secret-bearing details
         raise NotAuthenticated("Could not load stored Modeus token") from None
     if tokens is None or tokens.expires_at is None or tokens.expires_at <= time.time():
         raise NotAuthenticated("No unexpired stored Modeus token is available")
-    token = getattr(tokens, config.auth.token_kind, None)
+    token = getattr(tokens, token_kind, None)
     if not isinstance(token, str) or not token:
         raise NotAuthenticated("The selected stored Modeus token is unavailable")
     person_id = tokens.person_id
@@ -116,6 +121,14 @@ def build_server(
         person_resolver=resolver,
         person_authorizer=ResolvedPersonAuthorizer(),
         timezone_name=config.schedule.timezone,
+    )
+    # The BRS contract is registered, but no protected iStudent auth/source
+    # adapter is available until its real session and response schema are verified.
+    register_brs_tool(
+        server,
+        identity_provider=_IdentityProvider(str(parsed_person_id)),
+        session_provider=UnconfiguredIStudentSessionProvider(),
+        reader=None,
     )
     return server
 
