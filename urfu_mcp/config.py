@@ -10,8 +10,14 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import (BaseModel, ConfigDict, Field, SecretStr, ValidationError,
-                      field_validator)
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"name": "urfu-mcp"},
@@ -168,6 +174,29 @@ def initialize_config(path: str | os.PathLike[str] = "config.yaml") -> Path:
     return config_path
 
 
+def update_auth_settings(
+    path: str | os.PathLike[str] = "config.yaml",
+    *,
+    issuer: str,
+    client_id: str,
+) -> AppConfig:
+    """Atomically update public OIDC settings without replacing other YAML values."""
+    config_path = Path(path)
+    load_config(config_path)
+    document = _read_or_default(config_path)
+    auth = document.get("auth")
+    if not isinstance(auth, dict):
+        raise ConfigError("config.yaml contains invalid or unsupported settings")
+    auth["issuer"] = issuer
+    auth["client_id"] = client_id
+    try:
+        validated = AppConfig.model_validate(document)
+    except ValidationError:
+        raise ConfigError("config.yaml contains invalid or unsupported settings") from None
+    _write_config(config_path, document)
+    return validated
+
+
 def _read_or_default(path: Path) -> dict[str, Any]:
     if path.is_symlink():
         raise ConfigError("config.yaml must not be a symbolic link")
@@ -224,4 +253,5 @@ __all__ = [
     "SidecarSettings",
     "initialize_config",
     "load_config",
+    "update_auth_settings",
 ]
