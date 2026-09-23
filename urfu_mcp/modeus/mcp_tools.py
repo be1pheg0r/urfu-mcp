@@ -58,15 +58,22 @@ class ScheduleReaderProtocol(Protocol):
     ) -> list[ScheduleResult]: ...
 
 
-def _interval(date_value: str | None, period_start: str | None, period_end: str | None) -> DateInterval:
+def _interval(
+    date_value: str | None,
+    period_start: str | None,
+    period_end: str | None,
+    timezone_name: str,
+) -> DateInterval:
     if date_value is not None:
         if period_start is not None or period_end is not None:
             raise ValueError("provide a date or period, not both")
         selected = date.fromisoformat(date_value)
-        return local_date_interval(selected, selected)
+        return local_date_interval(selected, selected, timezone_name)
     if period_start is None or period_end is None:
         raise ValueError("provide a date or both period_start and period_end")
-    return local_date_interval(date.fromisoformat(period_start), date.fromisoformat(period_end))
+    return local_date_interval(
+        date.fromisoformat(period_start), date.fromisoformat(period_end), timezone_name
+    )
 
 
 def _schedule_payload(schedules: list[ScheduleResult], *, multiple: bool) -> dict[str, object]:
@@ -88,6 +95,7 @@ def register_schedule_tools(
     token_supplier: ScheduleTokenSupplier,
     person_resolver: PersonResolver,
     person_authorizer: PersonAuthorizer | None = None,
+    timezone_name: str = "Asia/Yekaterinburg",
 ) -> None:
     """Register the current-user and explicitly authorized person tools.
 
@@ -115,7 +123,7 @@ def register_schedule_tools(
     ) -> dict[str, object]:
         """Retrieve the authenticated current user's complete schedule."""
         identity, token = await identity_and_token()
-        interval = _interval(date, period_start, period_end)
+        interval = _interval(date, period_start, period_end, timezone_name)
         schedules = await reader.read([identity], interval, token=token)
         return _schedule_payload(schedules, multiple=False)
 
@@ -130,7 +138,7 @@ def register_schedule_tools(
     ) -> dict[str, object]:
         """Retrieve schedules for people explicitly resolved from a complete search."""
         identity, token = await identity_and_token()
-        interval = _interval(date, period_start, period_end)
+        interval = _interval(date, period_start, period_end, timezone_name)
         if (person is None) == (persons is None):
             raise ValueError("provide exactly one of person or persons")
         selectors = [person] if person is not None else persons

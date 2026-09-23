@@ -13,6 +13,7 @@ dependencies = [
     "keyring>=25.7,<26",
     "mcp>=2,<3",           # Official MCP server SDK
     "pydantic>=2.10,<3",   # Validation of normalized Modeus data
+    "PyYAML>=6,<7",        # Secure loading and generation of local server config
 ]
 
 [project.scripts]
@@ -26,6 +27,7 @@ dev = [
     "pytest>=8,<10",      # Contract tests with synthetic responses
     "ruff>=0.13,<1",
     "mypy>=1.18,<2",
+    "types-PyYAML>=6,<7",
 ]
 
 # SfeduSchedule is a Git submodule / .NET sidecar, not a Python dependency. Python's zoneinfo

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
+from uuid import UUID
 
 import httpx
 from authlib.oidc.core import CodeIDToken  # type: ignore[import-untyped]
@@ -47,6 +48,11 @@ class OidcConfig:
     issuer: str
     client_id: str
     redirect_uri: str
+    person_id_claim: str = "person_id"
+    callback_timeout_seconds: int = 300
+    metadata_timeout_seconds: float = 10.0
+    metadata_max_bytes: int = 1_000_000
+    transaction_ttl_seconds: int = 600
 
     def __post_init__(self) -> None:
         issuer = urlsplit(self.issuer)
@@ -61,6 +67,16 @@ class OidcConfig:
             raise ValueError("issuer must be an HTTPS URL without user info or query")
         if not self.client_id.strip():
             raise ValueError("client_id must not be empty")
+        if not self.person_id_claim.strip():
+            raise ValueError("person_id_claim must not be empty")
+        if self.callback_timeout_seconds <= 0:
+            raise ValueError("callback timeout must be positive")
+        if self.metadata_timeout_seconds <= 0 or self.metadata_timeout_seconds > 60:
+            raise ValueError("metadata timeout must be between 0 and 60 seconds")
+        if self.metadata_max_bytes < 1024:
+            raise ValueError("metadata size limit must be at least 1024 bytes")
+        if self.transaction_ttl_seconds <= 0:
+            raise ValueError("transaction lifetime must be positive")
 
         redirect = urlsplit(self.redirect_uri)
         if (
@@ -109,6 +125,7 @@ class OidcTokens:
     expires_at: float | None
     refresh_token: str | None = field(default=None, repr=False)
     claims: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    person_id: str | None = field(default=None, repr=False)
 
 
 class OidcClient:
@@ -124,10 +141,17 @@ class OidcClient:
         config: OidcConfig,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 10.0,
-        max_metadata_bytes: int = 1_000_000,
-        transaction_ttl: int = 600,
+        timeout: float | None = None,
+        max_metadata_bytes: int | None = None,
+        transaction_ttl: int | None = None,
     ) -> None:
+        timeout = config.metadata_timeout_seconds if timeout is None else timeout
+        max_metadata_bytes = (
+            config.metadata_max_bytes if max_metadata_bytes is None else max_metadata_bytes
+        )
+        transaction_ttl = (
+            config.transaction_ttl_seconds if transaction_ttl is None else transaction_ttl
+        )
         if timeout <= 0 or max_metadata_bytes <= 0 or transaction_ttl <= 0:
             raise ValueError("timeout, metadata size, and transaction lifetime must be positive")
         self._config = config
@@ -218,6 +242,15 @@ class OidcClient:
             nonce=transaction.nonce,
             access_token=access_token,
         )
+        raw_person_id = claims.get(self._config.person_id_claim)
+        if not isinstance(raw_person_id, str):
+            raise OidcError("ID token does not contain a valid person identity")
+        try:
+            parsed_person_id = UUID(raw_person_id)
+        except ValueError:
+            raise OidcError("ID token does not contain a valid person identity") from None
+        if parsed_person_id.int == 0:
+            raise OidcError("ID token does not contain a valid person identity")
         expires_in = token.get("expires_in")
         expires_at = None
         if (
@@ -235,6 +268,7 @@ class OidcClient:
             expires_at=expires_at,
             refresh_token=refresh_token if isinstance(refresh_token, str) else None,
             claims=dict(claims),
+            person_id=str(parsed_person_id),
         )
 
     def _consume_transaction(self, transaction: OidcTransaction) -> None:

@@ -140,6 +140,8 @@ async def login(
         print("Complete sign-in in the browser; waiting for the local callback.")
         callback = await receiver.wait_for_callback(callback_timeout)
         tokens = await client.complete_login(callback, login_request.transaction)
+        if not tokens.person_id:
+            raise ValueError("authenticated identity claim is missing")
         store.save(tokens)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("OIDC login cancelled.")
@@ -158,7 +160,9 @@ async def login(
 def run_login(config: OidcConfig) -> bool:
     """Synchronous CLI adapter."""
     try:
-        return asyncio.run(login(config))
+        return asyncio.run(
+            login(config, callback_timeout=config.callback_timeout_seconds)
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("OIDC login cancelled.")
         return False

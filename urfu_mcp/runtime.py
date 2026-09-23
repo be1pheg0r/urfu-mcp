@@ -3,76 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID
 
 import httpx
 from mcp.server import MCPServer
 
 from urfu_mcp.auth.token_store import TokenStore, create_token_store
+from urfu_mcp.config import AppConfig, ConfigError, load_config
 from urfu_mcp.modeus.authorization import ResolvedPersonAuthorizer
+from urfu_mcp.modeus.errors import NotAuthenticated
 from urfu_mcp.modeus.gateway import SfeduGateway
 from urfu_mcp.modeus.mcp_tools import register_schedule_tools
 from urfu_mcp.modeus.person_resolver import PersonResolver
 from urfu_mcp.modeus.person_source import SfeduPersonPageSource
 from urfu_mcp.modeus.reader import ScheduleReader
 
-
-@dataclass(frozen=True, slots=True)
-class RuntimeConfig:
-    person_id: str
-    token_kind: str
-    sfedu_url: str
-    api_key: str = field(repr=False)
-    max_days: int
-    max_subjects: int
-
-    @classmethod
-    def from_environment(cls) -> RuntimeConfig:
-        person_id = _required("URFU_MCP_PERSON_ID")
-        try:
-            parsed_person = UUID(person_id)
-        except (ValueError, TypeError, AttributeError):
-            raise ValueError("URFU_MCP_PERSON_ID must be a non-nil UUID") from None
-        if parsed_person.int == 0:
-            raise ValueError("URFU_MCP_PERSON_ID must be a non-nil UUID")
-
-        token_kind = _required("URFU_MCP_MODEUS_TOKEN_KIND")
-        if token_kind not in {"id_token", "access_token"}:
-            raise ValueError(
-                "URFU_MCP_MODEUS_TOKEN_KIND must be id_token or access_token"
-            )
-
-        sfedu_url = _required("URFU_MCP_SFEDU_URL")
-        api_key = _required("URFU_MCP_API_KEY")
-        max_days = _bounded_integer("URFU_MCP_MAX_DAYS", 1, 31)
-        max_subjects = _bounded_integer("URFU_MCP_MAX_SUBJECTS", 1, 10)
-        return cls(
-            str(parsed_person), token_kind, sfedu_url, api_key, max_days, max_subjects
-        )
-
-
-def _required(name: str) -> str:
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        raise ValueError(f"{name} is required")
-    return value.strip()
-
-
-def _bounded_integer(name: str, minimum: int, maximum: int) -> int:
-    value = _required(name)
-    try:
-        parsed = int(value)
-    except ValueError:
-        raise ValueError(
-            f"{name} must be an integer between {minimum} and {maximum}"
-        ) from None
-    if not minimum <= parsed <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    return parsed
+# Kept as an import alias for callers of the former environment config type.
+RuntimeConfig = AppConfig
 
 
 class _IdentityProvider:
@@ -106,56 +57,82 @@ class Runtime:
 
 
 def build_server(
-    config: RuntimeConfig,
+    config: AppConfig,
     *,
     token_store: TokenStore | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> MCPServer:
-    """Build the MCP server after loading and validating a stored selected token."""
-    from urfu_mcp.modeus.errors import NotAuthenticated
-
+    """Build the MCP server from YAML and authenticated identity in the keyring."""
     try:
         tokens = (token_store or create_token_store()).load()
     except Exception:  # noqa: BLE001 - keyring errors can contain secret-bearing details
         raise NotAuthenticated("Could not load stored Modeus token") from None
     if tokens is None or tokens.expires_at is None or tokens.expires_at <= time.time():
         raise NotAuthenticated("No unexpired stored Modeus token is available")
-    token = getattr(tokens, config.token_kind, None)
+    token = getattr(tokens, config.auth.token_kind, None)
     if not isinstance(token, str) or not token:
         raise NotAuthenticated("The selected stored Modeus token is unavailable")
+    person_id = tokens.person_id
+    if not isinstance(person_id, str):
+        raise NotAuthenticated("Stored authentication has no person identity; sign in again")
+    try:
+        parsed_person_id = UUID(person_id)
+    except ValueError:
+        raise NotAuthenticated("Stored authentication has no valid person identity") from None
+    if parsed_person_id.int == 0:
+        raise NotAuthenticated("Stored authentication has no valid person identity")
 
-    http_client = client or httpx.AsyncClient(timeout=10)
-    gateway = SfeduGateway(config.sfedu_url, client=http_client)
+    http_client = client or httpx.AsyncClient(timeout=config.sidecar.timeout_seconds)
+    gateway = SfeduGateway(
+        config.sidecar.base_url,
+        client=http_client,
+        timeout=config.sidecar.timeout_seconds,
+        max_response_bytes=config.sidecar.max_response_bytes,
+        size=config.sidecar.event_page_size,
+    )
     page_source = SfeduPersonPageSource(
-        config.sfedu_url, api_key=config.api_key, client=http_client
+        config.sidecar.base_url,
+        api_key=config.sidecar.api_key.get_secret_value(),
+        client=http_client,
+        timeout=config.sidecar.timeout_seconds,
+        max_response_bytes=config.sidecar.max_response_bytes,
     )
     reader = ScheduleReader(
-        gateway, max_days=config.max_days, max_subjects=config.max_subjects
+        gateway,
+        max_days=config.schedule.max_days,
+        max_subjects=config.schedule.max_subjects,
     )
-    resolver = PersonResolver(page_source)
-    server = MCPServer("urfu-mcp")
+    resolver = PersonResolver(
+        page_source,
+        page_size=config.sidecar.person_page_size,
+        max_pages=config.sidecar.person_max_pages,
+    )
+    server = MCPServer(config.server.name)
     register_schedule_tools(
         server,
         reader=reader,
-        identity_provider=_IdentityProvider(config.person_id),
+        identity_provider=_IdentityProvider(str(parsed_person_id)),
         token_supplier=_TokenSupplier(token, tokens.expires_at),
         person_resolver=resolver,
         person_authorizer=ResolvedPersonAuthorizer(),
+        timezone_name=config.schedule.timezone,
     )
     return server
 
 
 def create_runtime(
-    config: RuntimeConfig | None = None,
+    config: AppConfig | None = None,
     *,
+    config_path: str | Path = "config.yaml",
     token_store: TokenStore | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Runtime:
-    """Create a server and its shared HTTP client for the stdio process lifetime."""
-    http_client = client or httpx.AsyncClient(timeout=10)
+    """Load/generate YAML config and create the stdio server/client pair."""
+    app_config = config or load_config(config_path)
+    http_client = client or httpx.AsyncClient(timeout=app_config.sidecar.timeout_seconds)
     try:
         server = build_server(
-            config or RuntimeConfig.from_environment(),
+            app_config,
             token_store=token_store,
             client=http_client,
         )
@@ -166,14 +143,15 @@ def create_runtime(
     return Runtime(server, http_client)
 
 
-def serve() -> int:
+def serve(config_path: str | Path = "config.yaml") -> int:
     """Run the configured MCP server over stdio, emitting no diagnostics to stdout."""
-    from urfu_mcp.modeus.errors import NotAuthenticated
-
     try:
-        runtime = create_runtime()
+        runtime = create_runtime(config_path=config_path)
+    except ConfigError:
+        print("config.yaml is invalid; correct its settings and try again.", file=sys.stderr)
+        return 1
     except (ValueError, NotAuthenticated):
-        print("MCP runtime configuration or stored token is invalid.", file=sys.stderr)
+        print("MCP is not authenticated. Run `urfu-mcp auth` to sign in, then retry.", file=sys.stderr)
         return 1
     try:
         runtime.server.run(transport="stdio")

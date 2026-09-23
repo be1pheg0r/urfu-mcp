@@ -2,17 +2,15 @@
 
 ## Local Modeus MCP runtime
 
-`urfu-mcp serve` runs the existing schedule MCP tools over stdio. It does not start SfeduSchedule; configure a separately running local sidecar. The server exposes `retrieve_user_schedule` and `retrieve_person_schedule`. The latter permits a person ID only after the existing complete person search resolves it; explicitly selecting a foreign match is permitted by the default policy.
+Quick start:
 
-Set all of these environment variables before running:
+1. Run `urfu-mcp init` (or `urfu-mcp serve`; first startup also creates the config).
+2. Edit `config.yaml`: set the registered OIDC `auth.issuer` and `auth.client_id`, and make `sidecar.api_key` match the local SfeduSchedule sidecar configuration. `config.example.yaml` documents every setting and its default. Do not guess OIDC provider values.
+3. Run `urfu-mcp auth` and c    omplete sign-in in the browser.
+4. Run `urfu-mcp serve` as an MCP stdio server. The local SfeduSchedule sidecar must already be running at `sidecar.base_url`.
 
-- `URFU_MCP_PERSON_ID`: explicit, non-nil UUID used as the signed-in Modeus identity. It is not inferred from an OIDC claim.
-- `URFU_MCP_MODEUS_TOKEN_KIND`: exactly `id_token` or `access_token`; the selected token is read only from the system token store created by `urfu-mcp auth oidc`.
-- `URFU_MCP_SFEDU_URL`: loopback HTTP(S) base URL for an already-running SfeduSchedule service.
-- `URFU_MCP_API_KEY`: API key used only for the local person-search route.
-- `URFU_MCP_MAX_DAYS`: explicit inclusive schedule period limit, integer 1–31.
-- `URFU_MCP_MAX_SUBJECTS`: explicit people-per-request limit, integer 1–10.
+The generated `config.yaml` contains server settings and defaults only. OIDC tokens and the authenticated `person_id` are saved to the operating-system keyring; neither credentials nor person IDs are manually entered into the config. The configured `auth.person_id_claim` is read from the validated ID token during authentication. If the provider does not return a valid UUID in that claim, sign-in fails rather than assigning an identity manually. The YAML file is created with owner-only permissions and is ignored by Git. Its sidecar API key is a random local service credential, not the student's password or Modeus token.
 
-Startup fails closed if required settings are missing or invalid, or if the selected system-stored token has no expiry or is expired. The token expiry is checked again for each tool call. Tokens and the API key are not printed. `urfu-mcp auth credentials` continues to store credentials only; this runtime does not perform a password login or exchange those credentials for a session.
+All runtime settings live in YAML, not environment variables. `urfu-mcp auth credentials` remains an explicit legacy command for storing email/password in the keyring; it is not used by the OIDC login or schedule runtime. The MCP server exposes exactly `retrieve_user_schedule` and `retrieve_person_schedule`. A foreign person can be selected only after the complete search resolves the selection; the default policy allows that explicitly selected match.
 
-The runtime wiring and requests have been verified with synthetic keyring/token data and an in-memory HTTP transport. No live URFU/Modeus/SfeduSchedule integration is claimed or required by these checks. The chosen token kind must be explicitly selected by the operator; local tests do not establish which token a particular deployment accepts.
+The runtime and requests are tested with synthetic tokens and an in-memory HTTP transport. No live URFU/Modeus/OIDC compatibility is claimed. In particular, the actual registered issuer/client and which token kind Modeus accepts must be confirmed for the deployment.
