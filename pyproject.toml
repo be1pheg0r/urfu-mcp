@@ -1,0 +1,20 @@
+[project]
+name = "urfu-mcp"
+version = "0.1.0"
+description = "MCP interface to URFU services (architecture stage)"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27,<1",      # Local SfeduSchedule HTTP adapter (planned)
+    "pydantic>=2.10,<3",   # Validation of normalized Modeus data (planned)
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",      # Contract tests with synthetic responses (planned)
+    "ruff>=0.13,<1",
+    "mypy>=1.18,<2",
+]
+
+# Deliberately no build-system, scripts or MCP SDK yet: there is no Python package
+# or CLI implementation at this stage. SfeduSchedule is a Git submodule / .NET sidecar,
+# not a Python dependency. Python's zoneinfo handles Asia/Yekaterinburg.
