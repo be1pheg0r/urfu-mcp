@@ -7,8 +7,7 @@ import math
 from typing import Any
 from uuid import UUID
 
-from urfu_mcp.auth.credential_store import (PasswordBackend,
-                                            create_password_backend)
+from urfu_mcp.auth.credential_store import PasswordBackend, create_password_backend
 from urfu_mcp.auth.oidc import OidcTokens
 
 
