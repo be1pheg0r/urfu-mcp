@@ -5,8 +5,8 @@
 Quick start:
 
 1. Run `urfu-mcp init` (or `urfu-mcp serve`; first startup also creates the config).
-2. Edit `config.yaml`: set the registered OIDC `auth.issuer` and `auth.client_id`, and make `sidecar.api_key` match the local SfeduSchedule sidecar configuration. `config.example.yaml` documents every setting and its default. Do not guess OIDC provider values.
-3. Run `urfu-mcp auth` and c    omplete sign-in in the browser.
+2. Set `sidecar.api_key` to match the local SfeduSchedule sidecar configuration. `config.example.yaml` documents every setting and its default.
+3. Run `urfu-mcp auth`. It prompts only for missing `auth.issuer` and `auth.client_id`, validates and securely saves those public OIDC settings, then immediately opens the browser sign-in. You must supply the issuer and client ID registered for your provider/client; do not guess them. The `urfu-mcp auth oidc` / `urfu-mcp oidc` forms remain available.
 4. Run `urfu-mcp serve` as an MCP stdio server. The local SfeduSchedule sidecar must already be running at `sidecar.base_url`.
 
 The generated `config.yaml` contains server settings and defaults only. OIDC tokens and the authenticated `person_id` are saved to the operating-system keyring; neither credentials nor person IDs are manually entered into the config. The configured `auth.person_id_claim` is read from the validated ID token during authentication. If the provider does not return a valid UUID in that claim, sign-in fails rather than assigning an identity manually. The YAML file is created with owner-only permissions and is ignored by Git. Its sidecar API key is a random local service credential, not the student's password or Modeus token.

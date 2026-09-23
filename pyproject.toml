@@ -22,6 +22,9 @@ urfu-mcp = "urfu_mcp.auth.cli:entrypoint"
 [tool.setuptools.packages.find]
 include = ["urfu_mcp*"]
 
+[tool.isort]
+profile = "black"
+
 [dependency-groups]
 dev = [
     "pytest>=8,<10",      # Contract tests with synthetic responses

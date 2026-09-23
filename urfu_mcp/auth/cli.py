@@ -7,12 +7,19 @@ import getpass
 import sys
 from collections.abc import Sequence
 
-from urfu_mcp.auth.credential_store import (CredentialRecord,
-                                            CredentialStoreError,
-                                            create_credential_store)
+from urfu_mcp.auth.credential_store import (
+    CredentialRecord,
+    CredentialStoreError,
+    create_credential_store,
+)
 from urfu_mcp.auth.oidc import OidcConfig
 from urfu_mcp.auth.oidc_cli import run_login
-from urfu_mcp.config import ConfigError, initialize_config, load_config
+from urfu_mcp.config import (
+    ConfigError,
+    initialize_config,
+    load_config,
+    update_auth_settings,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -58,20 +65,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if options.command == "oidc" or (auth_requested and options.command is None):
         try:
-            settings = load_config().auth
+            loaded = load_config()
+            settings = loaded.auth
         except ConfigError:
             print("Could not read config.yaml safely.", file=sys.stderr)
             return 1
-        if not settings.issuer or not settings.client_id:
-            print(
-                "Set auth.issuer and auth.client_id in config.yaml to the registered OIDC provider values.",
-                file=sys.stderr,
-            )
+
+        issuer = settings.issuer
+        client_id = settings.client_id
+        try:
+            if not issuer:
+                issuer = input("OIDC issuer: ").strip()
+                if not issuer:
+                    print("OIDC issuer must not be empty.", file=sys.stderr)
+                    return 1
+            if not client_id:
+                client_id = input("OIDC client_id: ").strip()
+                if not client_id:
+                    print("OIDC client_id must not be empty.", file=sys.stderr)
+                    return 1
+        except (EOFError, KeyboardInterrupt):
+            print("OIDC settings entry cancelled.", file=sys.stderr)
             return 1
+
         try:
             config = OidcConfig(
-                issuer=settings.issuer,
-                client_id=settings.client_id,
+                issuer=issuer,
+                client_id=client_id,
                 redirect_uri=settings.redirect_uri,
                 person_id_claim=settings.person_id_claim,
                 callback_timeout_seconds=settings.callback_timeout_seconds,
@@ -80,8 +100,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 transaction_ttl_seconds=settings.transaction_ttl_seconds,
             )
         except ValueError:
-            print("Invalid OIDC settings in config.yaml.", file=sys.stderr)
+            print("Invalid OIDC provider settings.", file=sys.stderr)
             return 1
+
+        if not settings.issuer or not settings.client_id:
+            try:
+                update_auth_settings(issuer=issuer, client_id=client_id)
+            except ConfigError:
+                print("Could not save OIDC settings securely.", file=sys.stderr)
+                return 1
         return 0 if run_login(config) else 1
 
     if options.command is None:
