@@ -507,7 +507,8 @@ def run_unified_login(config_path: str = "config.yaml") -> bool:
                              client_id=session.client_id, token_kind="id_token")
         create_istudent_session_store().save(record)
     except Exception as error:  # noqa: BLE001 - backend details may contain secrets
-        print(f"Unified sign-in incomplete while {stage} ({type(error).__name__}); details suppressed.")
+        diagnostic = str(error) if isinstance(error, ModeusAuthenticationError) else type(error).__name__
+        print(f"Unified sign-in incomplete while {stage} ({diagnostic}); details suppressed.")
         return False
     print("Unified sign-in completed; verified sessions were stored securely.")
     return True
@@ -571,6 +572,21 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
     except CredentialStoreError:
         credentials = None
 
+    stage = ["playwright_startup"]
+    try:
+        return _open_browser_session_at_stage(
+            sync_playwright, credentials, visit_istudent, PlaywrightTimeoutError, stage
+        )
+    except Exception as error:  # noqa: BLE001 - suppress browser exception details
+        raise ModeusAuthenticationError(
+            f"Browser session failed at stage {stage[0]} ({type(error).__name__})"
+        ) from None
+
+
+def _open_browser_session_at_stage(
+    sync_playwright: Any, credentials: Any, visit_istudent: bool,
+    PlaywrightTimeoutError: type[Exception], stage: list[str],
+) -> BrowserOidcSession:
     with sync_playwright() as playwright:
         browser = _launch_chromium(playwright)
         captured_metadata: list[dict[str, Any]] = []
@@ -582,11 +598,13 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                     "response",
                     lambda response: _capture_oidc_metadata(response, captured_metadata),
                 )
+                stage[0] = "modeus_page_goto"
                 page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
                 if credentials is not None:
                     _fill_saved_credentials(page, credentials)
                 print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
                 try:
+                    stage[0] = "modeus_oidc_wait"
                     page.wait_for_function(
                         "() => { const hasOidc = s => Object.keys(s).some("
                         "key => key.startsWith('oidc.user:')); "
@@ -599,6 +617,7 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                         "No Modeus OIDC session appeared after sign-in. "
                         "The current sign-in session format may not be supported."
                     ) from None
+                stage[0] = "browser_storage_evaluate"
                 storage = page.evaluate(
                     "() => ({localStorage: Object.fromEntries(Object.keys(localStorage).map("
                     "key => [key, localStorage.getItem(key)])), "
@@ -618,11 +637,13 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                 if visit_istudent:
                     # Same page/context: SSO may reuse login, but an interactive
                     # redirect is not proof that its session can be persisted.
+                    stage[0] = "istudent_page_goto"
                     page.goto(
                         "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
                         wait_until="load", timeout=60_000,
                     )
                     try:
+                        stage[0] = "istudent_wait_for_url"
                         page.wait_for_url(
                             "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
                             timeout=_AUTH_TIMEOUT * 1000,
@@ -631,6 +652,7 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                         raise ModeusAuthenticationError(
                             "iStudent SSO did not complete; manual login or MFA may be required"
                         ) from None
+                    stage[0] = "cookie_capture"
                     istudent_cookies = _capture_istudent_cookies(context)
                 else:
                     istudent_cookies = None
@@ -638,6 +660,8 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                     session, oidc_metadata=metadata, istudent_cookies=istudent_cookies
                 )
             finally:
+                if sys.exc_info()[0] is None:
+                    stage[0] = "context_cleanup"
                 context.close()
         finally:
             browser.close()
