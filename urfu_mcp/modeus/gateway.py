@@ -9,8 +9,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .errors import (Forbidden, InvalidUpstreamResponse, NotAuthenticated,
-                     RateLimited, UpstreamUnavailable)
+from .errors import (
+    Forbidden,
+    InvalidUpstreamResponse,
+    NotAuthenticated,
+    RateLimited,
+    UpstreamUnavailable,
+)
 
 
 class SfeduGateway:
