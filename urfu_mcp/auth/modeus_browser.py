@@ -28,6 +28,11 @@ from urfu_mcp.auth.credential_store import (
 from urfu_mcp.auth.oidc import _ALLOWED_ID_TOKEN_ALGORITHMS, OidcTokens
 from urfu_mcp.auth.token_store import create_token_store
 from urfu_mcp.config import update_auth_settings
+from urfu_mcp.istudent.session_auth import validate_istudent_token
+from urfu_mcp.istudent.session_store import (
+    IStudentSessionRecord,
+    create_istudent_session_store,
+)
 
 TRUSTED_OIDC_ISSUER = "https://sso.urfu.ru/adfs"
 _TRUSTED_MODEUS_AUTHORITY = "https://urfu-auth.modeus.org/oauth2/authorize"
@@ -464,22 +469,74 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
 
 
 def run_unified_login(config_path: str = "config.yaml") -> bool:
-    """Visit both clients once; do not certify an unverified iStudent session."""
+    """Verify both same-context sessions, then persist them after explicit consent."""
+    stage = "opening browser session"
     try:
         session = _open_browser_session(visit_istudent=True)
-        _persist_modeus_session(session, config_path)
-    except ModeusAuthenticationError as error:
-        print(f"Unified sign-in incomplete: {error}")
-        return False
+        stage = "validating iStudent session"
+        tokens = validate_oidc_session(session, session.oidc_metadata or {})
+        cookies = session.istudent_cookies
+        if cookies is None:
+            raise ModeusAuthenticationError("iStudent session cookies are missing")
+        claims = validate_istudent_token(cookies["keycloakAccessToken"], now=time.time())
+        subject = claims.get("sub")
+        expiry = claims.get("exp")
+        if not isinstance(subject, str) or not subject or type(expiry) not in (int, float):
+            raise ModeusAuthenticationError("iStudent token identity is invalid")
+        response = _fetch_protected_istudent_page(cookies)
+        if not _looks_like_protected_brs(response.text):
+            raise ModeusAuthenticationError("iStudent protected BRS page was not verified")
+        print(
+            "Both signed-in app sessions came from the same fresh SSO browser context. "
+            "Their account identifiers are not assumed to match. Do both sessions "
+            "belong to you? Type YES to save them securely: ", end="", flush=True
+        )
+        if input().strip() != "YES":
+            print("Unified sign-in cancelled; no session was saved.")
+            return False
+        stage = "saving verified sessions"
+        record = IStudentSessionRecord(
+            modeus_person_id=cast(str, tokens.person_id),
+            istudent_subject=subject,
+            access_token=cookies["keycloakAccessToken"],
+            php_session_id=cookies["PHPSESSID"],
+            expires_at=min(cast(float, expiry), time.time() + 900),
+        )
+        create_token_store().save(tokens)
+        update_auth_settings(config_path, issuer=str((session.oidc_metadata or {})["issuer"]),
+                             client_id=session.client_id, token_kind="id_token")
+        create_istudent_session_store().save(record)
     except Exception as error:  # noqa: BLE001 - backend details may contain secrets
-        print(f"Unified sign-in incomplete ({type(error).__name__}); details suppressed.")
+        print(f"Unified sign-in incomplete while {stage} ({type(error).__name__}); details suppressed.")
         return False
-    print(
-        "Modeus tokens saved; iStudent sign-in cannot be certified: the client session "
-        "expiry and cross-client identity binding are unverified. No iStudent secret "
-        "was stored. Auth is incomplete."
-    )
-    return False
+    print("Unified sign-in completed; verified sessions were stored securely.")
+    return True
+
+
+def _fetch_protected_istudent_page(cookies: Mapping[str, str]) -> httpx.Response:
+    """Fetch only the fixed protected BRS page after the browser has closed."""
+    url = "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs"
+    try:
+        with httpx.Client(follow_redirects=False, timeout=20) as client:
+            response = client.get(url, headers={
+                "Cookie": f"PHPSESSID={cookies['PHPSESSID']}; keycloakAccessToken={cookies['keycloakAccessToken']}",
+                "Accept": "text/html",
+                "User-Agent": "urfu-mcp/0.1",
+            })
+    except httpx.HTTPError:
+        raise ModeusAuthenticationError("iStudent protected page request failed") from None
+    if response.status_code != 200:
+        raise ModeusAuthenticationError("iStudent protected page returned an invalid status")
+    if not response.headers.get("content-type", "").lower().startswith("text/html"):
+        raise ModeusAuthenticationError("iStudent protected page returned an invalid content type")
+    return response
+
+
+def _looks_like_protected_brs(html: str) -> bool:
+    return all(marker in html for marker in (
+        'id="year-select"', 'id="semester-select"', 'class="disciplines-list-header"',
+        'class="discipline-outer-container"',
+    )) and "<html" in html.lower()
 
 
 def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> None:
