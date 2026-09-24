@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -13,11 +12,34 @@ import httpx
 from joserfc import jwk, jwt
 from joserfc.errors import JoseError
 
+from .brs_parser import _HTMLTree
+
 ISSUER = "https://keys.urfu.ru/auth/realms/urfu-lk"
 JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
 MAX_JWKS_BYTES = 1_000_000
 ISTUDENT_HOST = "istudent.urfu.ru"
 ISTUDENT_PATH = "/s/http-urfu-ru-ru-students-study-brs"
+
+
+def _looks_like_protected_brs(html: str) -> bool:
+    """Check real HTML elements, not class attributes with exact whitespace."""
+    tree = _HTMLTree()
+    try:
+        tree.feed(html)
+    except ValueError:
+        return False
+    nodes = tree.root.descendants()
+    return (
+        any(node.tag == "html" for node in nodes)
+        and any(node.tag == "select" and node.attrs.get("id") == "year-select" for node in nodes)
+        and any(node.tag == "select" and node.attrs.get("id") == "semester-select" for node in nodes)
+        and any("disciplines-list-header" in node.classes() for node in nodes)
+        and any(
+            "discipline-outer-container" in descendant.classes()
+            for article in nodes if article.tag == "article"
+            for descendant in article.descendants()
+        )
+    )
 
 
 def _valid_session_url(url: httpx.URL) -> bool:
@@ -152,8 +174,7 @@ class StoredIStudentSessionProvider:
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if (
                 response.status_code != 200 or content_type != "text/html" or len(body) > 2_000_000
-                or re.search(rb"<article\b[^>]*class=[\"'][^\"']*\bdiscipline-outer-container\b", body) is None
-                or re.search(rb"<[^>]*\bid=[\"']year-select[\"']", body) is None
+                or not _looks_like_protected_brs(response.text)
             ):
                 await client.aclose()
                 raise IStudentSessionStoreError("iStudent protected page validation failed")
