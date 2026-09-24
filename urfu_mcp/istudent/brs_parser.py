@@ -311,7 +311,15 @@ class IStudentBRSDetailParser:
                 if any("discipline-controls" in n.classes() for n in top.descendants()):
                     raise InvalidUpstreamResponse("BRS detail contains unassigned controls")
                 if len(top.children) > 2:
-                    raise InvalidUpstreamResponse("BRS detail metadata is unrecognized")
+                    expected_metadata = [
+                        "discipline-detail-header",
+                        "list",
+                        "online-courses-common-text",
+                    ]
+                    if [
+                        next(iter(child.classes()), "") for child in top.children
+                    ] != expected_metadata:
+                        raise InvalidUpstreamResponse("BRS detail metadata is unrecognized")
                 continue
             if not top.closed:
                 raise InvalidUpstreamResponse("BRS detail is truncated")
@@ -338,12 +346,16 @@ class IStudentBRSDetailParser:
                         if len(spans) != 2 or "score-expression" not in spans[1].classes():
                             raise InvalidUpstreamResponse("BRS control structure is unrecognized")
                         maximum = _single([c for c in spans[1].children if c.tag == "strong"])
-                        pattern = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+из\s*балл(?:ов|а)?", spans[1].text())
+                        earned = _number(maximum.all_text())
+                        pattern = re.fullmatch(
+                            r"\s*из\s*(\d+(?:[.,]\d+)?)\s+балл(?:ов|а)?\s*",
+                            spans[1].text(),
+                        )
                         if not pattern:
                             raise InvalidUpstreamResponse("BRS control score is unrecognized")
                         controls.append(BRSScoreNode(
-                            name=_label(spans[0]), earned_points=_number(pattern.group(1)),
-                            maximum_points=_number(maximum.all_text()), raw_points=None,
+                            name=_label(spans[0]), earned_points=earned,
+                            maximum_points=_number(pattern.group(1)), raw_points=None,
                             weight=None, weighted_points=None, children=(),
                         ))
                 children.append(BRSScoreNode(
