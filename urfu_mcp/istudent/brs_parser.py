@@ -119,9 +119,7 @@ class IStudentBRSHTMLParser:
     """Map observed numeric final-score cells; unknown point meanings fail closed."""
 
     def parse(self, payload: str | bytes, *, as_of: date) -> BRSResult:
-        del (
-            as_of
-        )  # A future source must choose the requested period; do not guess here.
+        # The source still owns selection; only reject contradictions we can prove.
         if isinstance(payload, bytes):
             if len(payload) > MAX_HTML_BYTES:
                 raise InvalidUpstreamResponse("BRS HTML exceeds the size limit")
@@ -157,6 +155,13 @@ class IStudentBRSHTMLParser:
         )
         if not _YEAR.fullmatch(year) or semester not in {"Осенний", "Весенний"}:
             raise InvalidUpstreamResponse("BRS HTML period is unrecognized")
+        first_year, last_year = (int(part) for part in year.split("/"))
+        if last_year != first_year + 1:
+            raise InvalidUpstreamResponse("BRS HTML academic year is invalid")
+        # September is demonstrably autumn in the current academic year. This
+        # guard rejects a stale default, but does not choose periods for other dates.
+        if as_of.month == 9 and (first_year != as_of.year or semester != "Осенний"):
+            raise InvalidUpstreamResponse("BRS HTML selected period contradicts the request date")
         header = _single(
             [
                 n
