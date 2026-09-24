@@ -10,14 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    SecretStr,
-    ValidationError,
-    field_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"name": "urfu-mcp"},
@@ -32,9 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "metadata_max_bytes": 1_000_000,
         "transaction_ttl_seconds": 600,
     },
-    "sidecar": {
-        "base_url": "http://127.0.0.1:8080",
-        "api_key": None,
+    "modeus_http": {
         "timeout_seconds": 10.0,
         "max_response_bytes": 2_000_000,
         "event_page_size": 1000,
@@ -103,22 +94,12 @@ class AuthSettings(_Section):
         return value
 
 
-class SidecarSettings(_Section):
-    base_url: str = "http://127.0.0.1:8080"
-    api_key: SecretStr
+class ModeusHttpSettings(_Section):
     timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     max_response_bytes: int = Field(default=2_000_000, ge=1024, le=20_000_000)
     event_page_size: int = Field(default=1000, ge=1, le=5000)
     person_page_size: int = Field(default=50, ge=1, le=100)
     person_max_pages: int = Field(default=10, ge=1, le=100)
-
-    @field_validator("api_key")
-    @classmethod
-    def api_key_must_be_nonempty(cls, value: SecretStr) -> SecretStr:
-        secret = value.get_secret_value()
-        if not secret or any(character.isspace() for character in secret):
-            raise ValueError("sidecar API key must be non-empty and contain no whitespace")
-        return value
 
 
 class ScheduleSettings(_Section):
@@ -139,20 +120,19 @@ class ScheduleSettings(_Section):
 class AppConfig(_Section):
     server: ServerSettings = Field(default_factory=ServerSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
-    sidecar: SidecarSettings
+    modeus_http: ModeusHttpSettings = Field(default_factory=ModeusHttpSettings)
     schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
 
     @property
     def server_name(self) -> str:
         return self.server.name
 
-
 def load_config(path: str | os.PathLike[str] = "config.yaml") -> AppConfig:
-    """Load config, creating it with secure defaults and a local API key if absent."""
+    """Load config, generating bounded direct-HTTP defaults if absent."""
     config_path = Path(path)
     document = _read_or_default(config_path)
     defaults = deepcopy(DEFAULT_CONFIG)
-    defaults["sidecar"]["api_key"] = secrets.token_urlsafe(32)
+
 
     changed = _merge_missing(document, defaults)
     if changed:
@@ -181,6 +161,7 @@ def update_auth_settings(
     *,
     issuer: str,
     client_id: str,
+    token_kind: str | None = None,
 ) -> AppConfig:
     """Atomically update public OIDC settings without replacing other YAML values."""
     config_path = Path(path)
@@ -191,6 +172,8 @@ def update_auth_settings(
         raise ConfigError("config.yaml contains invalid or unsupported settings")
     auth["issuer"] = issuer
     auth["client_id"] = client_id
+    if token_kind is not None:
+        auth["token_kind"] = token_kind
     try:
         validated = AppConfig.model_validate(document)
     except ValidationError:
@@ -218,7 +201,7 @@ def _read_or_default(path: Path) -> dict[str, Any]:
 def _merge_missing(target: dict[str, Any], defaults: dict[str, Any]) -> bool:
     changed = False
     for key, default_value in defaults.items():
-        if key not in target or key == "api_key" and not target[key]:
+        if key not in target:
             target[key] = deepcopy(default_value)
             changed = True
         elif isinstance(default_value, dict) and isinstance(target[key], dict):
@@ -250,9 +233,9 @@ __all__ = [
     "AppConfig",
     "AuthSettings",
     "ConfigError",
+    "ModeusHttpSettings",
     "ScheduleSettings",
     "ServerSettings",
-    "SidecarSettings",
     "initialize_config",
     "load_config",
     "update_auth_settings",

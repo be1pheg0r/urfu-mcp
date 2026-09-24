@@ -31,7 +31,9 @@ class TokenStore:
 
     def save(self, tokens: OidcTokens) -> None:
         if (
-            not tokens.access_token
+            tokens.access_token is not None
+            and (not isinstance(tokens.access_token, str) or not tokens.access_token)
+            or not isinstance(tokens.id_token, str)
             or not tokens.id_token
             or tokens.token_type.lower() != "bearer"
             or tokens.person_id is not None and not _valid_person_id(tokens.person_id)
@@ -67,8 +69,11 @@ class TokenStore:
                 not isinstance(data, dict)
                 or frozenset(data)
                 not in {frozenset(old_keys), frozenset(old_keys | {"person_id"})}
-                or not isinstance(data["access_token"], str)
-                or not data["access_token"]
+                or data["access_token"] is not None
+                and (
+                    not isinstance(data["access_token"], str)
+                    or not data["access_token"]
+                )
                 or not isinstance(data["id_token"], str)
                 or not data["id_token"]
                 or not isinstance(data["token_type"], str)

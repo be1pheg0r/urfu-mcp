@@ -12,6 +12,7 @@ from urfu_mcp.auth.credential_store import (
     CredentialStoreError,
     create_credential_store,
 )
+from urfu_mcp.auth.modeus_browser import run_modeus_login
 from urfu_mcp.auth.oidc import OidcConfig
 from urfu_mcp.auth.oidc_cli import run_login
 from urfu_mcp.config import (
@@ -26,6 +27,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="urfu-mcp")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("init", help="create config.yaml with safe defaults")
+    commands.add_parser("start", help="run the managed MCP stdio server")
+    commands.add_parser("stop", help="stop only the recorded managed MCP process")
     commands.add_parser("credentials", help="store email and password securely")
     commands.add_parser(
         "oidc", help="sign in using OIDC settings from config.yaml"
@@ -55,15 +58,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ConfigError:
             print("Could not create or validate config.yaml securely.", file=sys.stderr)
             return 1
-        print("config.yaml is ready. Review its settings before authentication.")
+        print("config.yaml is ready. Run `urfu-mcp auth` to sign in.")
         return 0
+
+    if options.command in {"start", "stop"}:
+        from urfu_mcp import process_manager
+
+        return process_manager.start() if options.command == "start" else process_manager.stop()
 
     if options.command == "serve":
         from urfu_mcp.runtime import serve
 
         return serve()
 
-    if options.command == "oidc" or (auth_requested and options.command is None):
+    if auth_requested and options.command is None:
+        try:
+            load_config()
+        except ConfigError:
+            print("Could not read config.yaml safely.", file=sys.stderr)
+            return 1
+        return 0 if run_modeus_login() else 1
+
+    if options.command == "oidc":
         try:
             loaded = load_config()
             settings = loaded.auth

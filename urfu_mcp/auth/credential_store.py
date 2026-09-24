@@ -70,6 +70,24 @@ class CredentialStore:
             raise CredentialDataError("Malformed stored credentials") from None
         return CredentialRecord(email=data["email"], password=data["password"])
 
+    def load_any(self) -> CredentialRecord | None:
+        """Load one previously saved account without asking for its email."""
+        lookup = getattr(self._backend, "get_credential", None)
+        if not callable(lookup):
+            return None
+        try:
+            credential = lookup(self._service_name, None)
+        except NotImplementedError:
+            return None
+        except Exception:  # noqa: BLE001 - keyring errors can contain account details
+            raise CredentialStoreError("Could not load stored credentials") from None
+        if credential is None:
+            return None
+        email = getattr(credential, "username", None)
+        if not isinstance(email, str) or not email:
+            raise CredentialDataError("Stored credentials have no account identifier")
+        return self.load(email)
+
     def delete(self, email: str) -> None:
         try:
             self._backend.delete_password(self._service_name, email)

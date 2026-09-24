@@ -17,11 +17,10 @@ from urfu_mcp.config import AppConfig, ConfigError, load_config
 from urfu_mcp.istudent.auth import UnconfiguredIStudentSessionProvider
 from urfu_mcp.istudent.mcp_tools import register_brs_tool
 from urfu_mcp.modeus.authorization import ResolvedPersonAuthorizer
+from urfu_mcp.modeus.direct_client import ModeusDirectClient
 from urfu_mcp.modeus.errors import NotAuthenticated
-from urfu_mcp.modeus.gateway import SfeduGateway
 from urfu_mcp.modeus.mcp_tools import register_schedule_tools
 from urfu_mcp.modeus.person_resolver import PersonResolver
-from urfu_mcp.modeus.person_source import SfeduPersonPageSource
 from urfu_mcp.modeus.reader import ScheduleReader
 
 # Kept as an import alias for callers of the former environment config type.
@@ -87,20 +86,13 @@ def build_server(
     if parsed_person_id.int == 0:
         raise NotAuthenticated("Stored authentication has no valid person identity")
 
-    http_client = client or httpx.AsyncClient(timeout=config.sidecar.timeout_seconds)
-    gateway = SfeduGateway(
-        config.sidecar.base_url,
+    http_client = client or httpx.AsyncClient(timeout=config.modeus_http.timeout_seconds)
+    gateway = ModeusDirectClient(
         client=http_client,
-        timeout=config.sidecar.timeout_seconds,
-        max_response_bytes=config.sidecar.max_response_bytes,
-        size=config.sidecar.event_page_size,
-    )
-    page_source = SfeduPersonPageSource(
-        config.sidecar.base_url,
-        api_key=config.sidecar.api_key.get_secret_value(),
-        client=http_client,
-        timeout=config.sidecar.timeout_seconds,
-        max_response_bytes=config.sidecar.max_response_bytes,
+        timeout=config.modeus_http.timeout_seconds,
+        max_response_bytes=config.modeus_http.max_response_bytes,
+        event_page_size=config.modeus_http.event_page_size,
+        timezone_name=config.schedule.timezone,
     )
     reader = ScheduleReader(
         gateway,
@@ -108,9 +100,9 @@ def build_server(
         max_subjects=config.schedule.max_subjects,
     )
     resolver = PersonResolver(
-        page_source,
-        page_size=config.sidecar.person_page_size,
-        max_pages=config.sidecar.person_max_pages,
+        gateway,
+        page_size=config.modeus_http.person_page_size,
+        max_pages=config.modeus_http.person_max_pages,
     )
     server = MCPServer(config.server.name)
     register_schedule_tools(
@@ -142,7 +134,7 @@ def create_runtime(
 ) -> Runtime:
     """Load/generate YAML config and create the stdio server/client pair."""
     app_config = config or load_config(config_path)
-    http_client = client or httpx.AsyncClient(timeout=app_config.sidecar.timeout_seconds)
+    http_client = client or httpx.AsyncClient(timeout=app_config.modeus_http.timeout_seconds)
     try:
         server = build_server(
             app_config,
@@ -166,10 +158,14 @@ def serve(config_path: str | Path = "config.yaml") -> int:
     except (ValueError, NotAuthenticated):
         print("MCP is not authenticated. Run `urfu-mcp auth` to sign in, then retry.", file=sys.stderr)
         return 1
-    try:
-        runtime.server.run(transport="stdio")
-    finally:
-        asyncio.run(runtime.aclose())
+
+    async def run_and_close() -> None:
+        try:
+            await runtime.server.run_stdio_async()
+        finally:
+            await runtime.aclose()
+
+    asyncio.run(run_and_close())
     return 0
 
 
