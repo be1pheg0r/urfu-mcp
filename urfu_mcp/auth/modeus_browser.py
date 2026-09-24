@@ -447,25 +447,8 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
     stage = "opening browser session"
     try:
         session = _open_browser_session()
-        stage = "discovering identity-provider metadata"
-        metadata = session.oidc_metadata
-        if metadata is None and session.authority == TRUSTED_OIDC_ISSUER:
-            metadata = fetch_oidc_metadata(TRUSTED_OIDC_ISSUER)
-        if metadata is None:
-            raise ModeusAuthenticationError(
-                "No trusted OIDC discovery document was captured during sign-in"
-            )
-        stage = "validating Modeus tokens"
-        tokens = validate_oidc_session(session, metadata)
-        stage = "storing tokens in the system keyring"
-        create_token_store().save(tokens)
-        stage = "updating local configuration"
-        update_auth_settings(
-            config_path,
-            issuer=str(metadata["issuer"]),
-            client_id=session.client_id,
-            token_kind="id_token",
-        )
+        stage = "validating and storing Modeus tokens"
+        _persist_modeus_session(session, config_path)
     except ModeusAuthenticationError as error:
         print(f"Modeus sign-in failed while {stage}: {error}")
         return False
@@ -479,7 +462,44 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
     return True
 
 
-def _open_browser_session() -> BrowserOidcSession:
+def run_unified_login(config_path: str = "config.yaml") -> bool:
+    """Visit both clients once; do not certify an unverified iStudent session."""
+    try:
+        session = _open_browser_session(visit_istudent=True)
+        _persist_modeus_session(session, config_path)
+    except ModeusAuthenticationError as error:
+        print(f"Unified sign-in incomplete: {error}")
+        return False
+    except Exception as error:  # noqa: BLE001 - backend details may contain secrets
+        print(f"Unified sign-in incomplete ({type(error).__name__}); details suppressed.")
+        return False
+    print(
+        "Modeus tokens saved; iStudent sign-in cannot be certified: the client session "
+        "expiry and cross-client identity binding are unverified. No iStudent secret "
+        "was stored. Auth is incomplete."
+    )
+    return False
+
+
+def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> None:
+    metadata = session.oidc_metadata
+    if metadata is None and session.authority == TRUSTED_OIDC_ISSUER:
+        metadata = fetch_oidc_metadata(TRUSTED_OIDC_ISSUER)
+    if metadata is None:
+        raise ModeusAuthenticationError(
+            "No trusted OIDC discovery document was captured during sign-in"
+        )
+    tokens = validate_oidc_session(session, metadata)
+    create_token_store().save(tokens)
+    update_auth_settings(
+        config_path,
+        issuer=str(metadata["issuer"]),
+        client_id=session.client_id,
+        token_kind="id_token",
+    )
+
+
+def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession:
     """Use a visible Chromium window so the user can complete SSO and MFA."""
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -497,45 +517,67 @@ def _open_browser_session() -> BrowserOidcSession:
         browser = _launch_chromium(playwright)
         captured_metadata: list[dict[str, Any]] = []
         try:
-            page = browser.new_page()
-            page.on(
-                "response",
-                lambda response: _capture_oidc_metadata(response, captured_metadata),
-            )
-            page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
-            if credentials is not None:
-                _fill_saved_credentials(page, credentials)
-            print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
+            context = browser.new_context()
             try:
-                page.wait_for_function(
-                    "() => { const hasOidc = s => Object.keys(s).some("
-                    "key => key.startsWith('oidc.user:')); "
-                    "return location.hostname === 'urfu.modeus.org' && "
-                    "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
-                    timeout=_AUTH_TIMEOUT * 1000,
+                page = context.new_page()
+                page.on(
+                    "response",
+                    lambda response: _capture_oidc_metadata(response, captured_metadata),
                 )
-            except PlaywrightTimeoutError:
-                raise ModeusAuthenticationError(
-                    "No Modeus OIDC session appeared after sign-in. "
-                    "The current sign-in session format may not be supported."
-                ) from None
-            storage = page.evaluate(
-                "() => ({localStorage: Object.fromEntries(Object.keys(localStorage).map("
-                "key => [key, localStorage.getItem(key)])), "
-                "sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map("
-                "key => [key, sessionStorage.getItem(key)]))})"
-            )
+                page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
+                if credentials is not None:
+                    _fill_saved_credentials(page, credentials)
+                print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
+                try:
+                    page.wait_for_function(
+                        "() => { const hasOidc = s => Object.keys(s).some("
+                        "key => key.startsWith('oidc.user:')); "
+                        "return location.hostname === 'urfu.modeus.org' && "
+                        "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
+                        timeout=_AUTH_TIMEOUT * 1000,
+                    )
+                except PlaywrightTimeoutError:
+                    raise ModeusAuthenticationError(
+                        "No Modeus OIDC session appeared after sign-in. "
+                        "The current sign-in session format may not be supported."
+                    ) from None
+                storage = page.evaluate(
+                    "() => ({localStorage: Object.fromEntries(Object.keys(localStorage).map("
+                    "key => [key, localStorage.getItem(key)])), "
+                    "sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map("
+                    "key => [key, sessionStorage.getItem(key)]))})"
+                )
+                if (
+                    not isinstance(storage, dict)
+                    or not isinstance(storage.get("localStorage"), dict)
+                    or not isinstance(storage.get("sessionStorage"), dict)
+                ):
+                    raise ModeusAuthenticationError(
+                        "Modeus did not return an authenticated browser session"
+                    )
+                session = parse_browser_storage(storage["localStorage"], storage["sessionStorage"])
+                metadata = _select_oidc_metadata(captured_metadata, session.id_token, session.client_id)
+                if visit_istudent:
+                    # Same page/context: SSO may reuse login, but an interactive
+                    # redirect is not proof that its session can be persisted.
+                    page.goto(
+                        "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
+                        wait_until="load", timeout=60_000,
+                    )
+                    try:
+                        page.wait_for_url(
+                            "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
+                            timeout=_AUTH_TIMEOUT * 1000,
+                        )
+                    except PlaywrightTimeoutError:
+                        raise ModeusAuthenticationError(
+                            "iStudent SSO did not complete; manual login or MFA may be required"
+                        ) from None
+                return replace(session, oidc_metadata=metadata)
+            finally:
+                context.close()
         finally:
             browser.close()
-    if (
-        not isinstance(storage, dict)
-        or not isinstance(storage.get("localStorage"), dict)
-        or not isinstance(storage.get("sessionStorage"), dict)
-    ):
-        raise ModeusAuthenticationError("Modeus did not return an authenticated browser session")
-    session = parse_browser_storage(storage["localStorage"], storage["sessionStorage"])
-    metadata = _select_oidc_metadata(captured_metadata, session.id_token, session.client_id)
-    return replace(session, oidc_metadata=metadata)
 
 
 def _launch_chromium(playwright: Any) -> Any:
@@ -559,7 +601,19 @@ def _launch_chromium(playwright: Any) -> Any:
 
 def _fill_saved_credentials(page: Any, credentials: CredentialRecord) -> None:
     """Fill only the official URFU ADFS login form with keyring-stashed values."""
-    if urlsplit(page.url).hostname != "sso.urfu.ru":
+    parsed = urlsplit(page.url)
+    try:
+        trusted = (
+            parsed.scheme == "https"
+            and parsed.hostname == "sso.urfu.ru"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path == "/adfs/ls/"
+        )
+    except ValueError:
+        trusted = False
+    if not trusted:
         return
     username = page.locator("form#loginForm input[name='UserName']")
     password = page.locator("form#loginForm input[name='Password']")
