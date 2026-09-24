@@ -12,7 +12,7 @@ from urfu_mcp.auth.credential_store import (
     CredentialStoreError,
     create_credential_store,
 )
-from urfu_mcp.auth.modeus_browser import run_modeus_login
+from urfu_mcp.auth.modeus_browser import run_unified_login
 from urfu_mcp.auth.oidc import OidcConfig
 from urfu_mcp.auth.oidc_cli import run_login
 from urfu_mcp.config import (
@@ -87,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ConfigError:
             print("Could not read config.yaml safely.", file=sys.stderr)
             return 1
-        return 0 if run_modeus_login() else 1
+        return 0 if run_unified_login() else 1
 
     if options.command == "oidc":
         try:
