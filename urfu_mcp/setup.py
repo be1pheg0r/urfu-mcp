@@ -22,7 +22,6 @@ from urfu_mcp.auth.credential_store import CredentialStoreError
 from urfu_mcp.auth.modeus_browser import run_unified_login
 from urfu_mcp.auth.token_store import TokenStoreError, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, initialize_config, load_config
-from urfu_mcp.wizard_fire import play_flame_logo
 
 T = TypeVar("T")
 
@@ -174,30 +173,28 @@ def _tokens_usable(config: AppConfig, tokens: object) -> bool:
 
 
 class SetupUI:
-    """Rich interactive UI with plain, animation-free redirected output."""
+    """Rich interactive UI with a static banner and plain redirected output."""
 
     def __init__(self, *, no_color: bool = False, non_interactive: bool = False):
         self.interactive = bool(sys.stdin.isatty() and sys.stdout.isatty() and not non_interactive)
         color_disabled = no_color or "NO_COLOR" in os.environ
-        self._animate_welcome = self.interactive and not color_disabled
+        color_enabled = self.interactive and not color_disabled
         self.console = Console(
             highlight=False,
-            color_system="auto" if self._animate_welcome else None,
-            force_terminal=self._animate_welcome,
-            no_color=not self._animate_welcome,
+            color_system="auto" if color_enabled else None,
+            force_terminal=color_enabled,
+            no_color=not color_enabled,
         )
 
     def welcome(self) -> bool:
         logo = _block_logo()
-        if self._animate_welcome:
-            play_flame_logo(self.console, logo)
         self.console.print(Panel(
             Text(f"{logo}\nURFU-MCP", style="bold blue", justify="center"),
             subtitle="Помощник по первичной настройке",
             border_style="blue",
             padding=(1, 2),
         ))
-        self.console.print("Настроим локальный конфиг и проверим вход в Modeus.")
+        self.console.print("Настроим локальный конфиг и проверим вход в Modeus и iStudent.")
         if not self.interactive:
             return True
         try:
