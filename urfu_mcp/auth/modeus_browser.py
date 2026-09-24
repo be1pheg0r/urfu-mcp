@@ -55,6 +55,7 @@ class BrowserOidcSession:
     expires_at: float
     refresh_token: str | None = field(default=None, repr=False)
     oidc_metadata: dict[str, Any] | None = field(default=None, repr=False)
+    istudent_cookies: dict[str, str] | None = field(default=None, repr=False)
 
     @property
     def authority(self) -> str:
@@ -573,11 +574,43 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
                         raise ModeusAuthenticationError(
                             "iStudent SSO did not complete; manual login or MFA may be required"
                         ) from None
-                return replace(session, oidc_metadata=metadata)
+                    istudent_cookies = _capture_istudent_cookies(context)
+                else:
+                    istudent_cookies = None
+                return replace(
+                    session, oidc_metadata=metadata, istudent_cookies=istudent_cookies
+                )
             finally:
                 context.close()
         finally:
             browser.close()
+
+
+def _capture_istudent_cookies(context: Any) -> dict[str, str]:
+    """Capture only the exact protected iStudent host's required session cookies."""
+    cookies = context.cookies("https://istudent.urfu.ru/")
+    if not isinstance(cookies, list):
+        raise ModeusAuthenticationError("iStudent session cookies are invalid")
+    required = {"PHPSESSID", "keycloakAccessToken"}
+    selected: dict[str, str] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = cookie.get("name")
+        if name not in required:
+            continue
+        if (
+            cookie.get("domain") != "istudent.urfu.ru"
+            or cookie.get("path") != "/"
+            or name in selected
+            or not isinstance(cookie.get("value"), str)
+            or not cookie["value"]
+        ):
+            raise ModeusAuthenticationError("iStudent session cookies are invalid")
+        selected[name] = cookie["value"]
+    if set(selected) != required:
+        raise ModeusAuthenticationError("iStudent session cookies are missing")
+    return selected
 
 
 def _launch_chromium(playwright: Any) -> Any:
