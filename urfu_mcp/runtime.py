@@ -14,7 +14,12 @@ from mcp.server import MCPServer
 
 from urfu_mcp.auth.token_store import TokenStore, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, load_config
-from urfu_mcp.istudent.auth import UnconfiguredIStudentSessionProvider
+from urfu_mcp.istudent.auth import (
+    IStudentSessionProvider,
+    UnconfiguredIStudentSessionProvider,
+)
+from urfu_mcp.istudent.brs import BRSPeriodReader
+from urfu_mcp.istudent.brs_source import IStudentBRSPageSource
 from urfu_mcp.istudent.mcp_tools import register_brs_tool
 from urfu_mcp.modeus.authorization import ResolvedPersonAuthorizer
 from urfu_mcp.modeus.direct_client import ModeusDirectClient
@@ -62,6 +67,8 @@ def build_server(
     *,
     token_store: TokenStore | None = None,
     client: httpx.AsyncClient | None = None,
+    istudent_session_provider: IStudentSessionProvider | None = None,
+    brs_reader: BRSPeriodReader | None = None,
 ) -> MCPServer:
     """Build the MCP server from YAML and authenticated identity in the keyring."""
     token_kind = getattr(config.auth, "token_kind", None)
@@ -114,13 +121,18 @@ def build_server(
         person_authorizer=ResolvedPersonAuthorizer(),
         timezone_name=config.schedule.timezone,
     )
-    # The BRS contract is registered, but no protected iStudent auth/source
-    # adapter is available until its real session and response schema are verified.
+    # The default remains deliberately unavailable. An explicit session provider
+    # opts into the verified, bounded read-only page source; tests and callers may
+    # inject a period reader directly to control its transport.
+    session_provider = istudent_session_provider or UnconfiguredIStudentSessionProvider()
+    period_reader = brs_reader
+    if period_reader is None and istudent_session_provider is not None:
+        period_reader = BRSPeriodReader(IStudentBRSPageSource())
     register_brs_tool(
         server,
         identity_provider=_IdentityProvider(str(parsed_person_id)),
-        session_provider=UnconfiguredIStudentSessionProvider(),
-        reader=None,
+        session_provider=session_provider,
+        reader=period_reader,
     )
     return server
 
