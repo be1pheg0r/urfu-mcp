@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
@@ -43,7 +43,12 @@ class BRSPeriodPages:
 
 def _verified_option_url(option: _Node) -> str:
     value = option.attrs.get("value", "")
-    url = httpx.URL(value)
+    try:
+        # The site emits same-origin path-relative option values. Resolve against
+        # the fixed page, then validate the complete URL before returning it.
+        url = httpx.URL(urljoin(_BASE, value))
+    except (TypeError, ValueError):
+        raise InvalidUpstreamResponse("BRS period option URL is untrusted") from None
     if (
         url.scheme != "https" or url.host != "istudent.urfu.ru"
         or url.port not in (None, 443) or url.path != urlsplit(_BASE).path
@@ -53,7 +58,7 @@ def _verified_option_url(option: _Node) -> str:
     keys = [key for key, _ in url.params.multi_items()]
     if len(keys) != len(set(keys)) or not {"studentUid", "groupId", "year"} <= set(keys) or set(keys) - {"studentUid", "groupId", "year", "semester"}:
         raise InvalidUpstreamResponse("BRS period option parameters are untrusted")
-    return value
+    return str(url)
 
 
 def _select(tree: _HTMLTree, selector: str, label: str) -> tuple[bool, str]:
