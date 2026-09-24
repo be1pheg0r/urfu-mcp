@@ -28,7 +28,12 @@ from urfu_mcp.auth.credential_store import (
 from urfu_mcp.auth.oidc import _ALLOWED_ID_TOKEN_ALGORITHMS, OidcTokens
 from urfu_mcp.auth.token_store import create_token_store
 from urfu_mcp.config import update_auth_settings
-from urfu_mcp.istudent.session_auth import validate_istudent_token
+from urfu_mcp.istudent.session_auth import (
+    _looks_like_protected_brs as _session_brs_check,
+)
+from urfu_mcp.istudent.session_auth import (
+    validate_istudent_token,
+)
 from urfu_mcp.istudent.session_store import (
     IStudentSessionRecord,
     create_istudent_session_store,
@@ -534,10 +539,7 @@ def _fetch_protected_istudent_page(cookies: Mapping[str, str]) -> httpx.Response
 
 
 def _looks_like_protected_brs(html: str) -> bool:
-    return all(marker in html for marker in (
-        'id="year-select"', 'id="semester-select"', 'class="disciplines-list-header"',
-        'class="discipline-outer-container"',
-    )) and "<html" in html.lower()
+    return _session_brs_check(html)
 
 
 def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> None:
@@ -635,16 +637,17 @@ def _open_browser_session_at_stage(
                 session = parse_browser_storage(storage["localStorage"], storage["sessionStorage"])
                 metadata = _select_oidc_metadata(captured_metadata, session.id_token, session.client_id)
                 if visit_istudent:
-                    # Same page/context: SSO may reuse login, but an interactive
-                    # redirect is not proof that its session can be persisted.
+                    # Keep Modeus's SPA page intact while iStudent completes its
+                    # own redirects. Both pages share one explicit SSO context.
+                    istudent_page = context.new_page()
                     stage[0] = "istudent_page_goto"
-                    page.goto(
+                    istudent_page.goto(
                         "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
                         wait_until="load", timeout=60_000,
                     )
                     try:
                         stage[0] = "istudent_wait_for_url"
-                        page.wait_for_url(
+                        istudent_page.wait_for_url(
                             "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
                             timeout=_AUTH_TIMEOUT * 1000,
                         )

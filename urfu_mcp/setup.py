@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -103,10 +104,8 @@ class DefaultSetupServices:
             ) from None
         if not _tokens_usable(config, tokens):
             return False
-        # No iStudent keyring record may be recognized until its signed identity,
-        # cookie scope and expiry have been verified against the Modeus identity.
-        # A Modeus-only record must never mark both clients authenticated.
-        return False
+        person_id = getattr(tokens, "person_id", None)
+        return isinstance(person_id, str) and _istudent_session_ready(person_id)
 
     def authenticate(self) -> None:
         if not run_unified_login():
@@ -125,7 +124,34 @@ class DefaultSetupServices:
             ) from None
         if not _tokens_usable(config, tokens):
             raise SetupError("No valid Modeus sign-in was found. Rerun `urfu-mcp setup` to try again.")
-        raise SetupError("iStudent authentication cannot be verified; setup is incomplete.")
+        person_id = getattr(tokens, "person_id", None)
+        if not isinstance(person_id, str) or not _istudent_session_ready(person_id):
+            raise SetupError("iStudent authentication cannot be verified; setup is incomplete.")
+
+
+def _istudent_session_ready(person_id: str) -> bool:
+    """Check the signed, bound iStudent session and protected page, then close it."""
+    from urfu_mcp.istudent.session_auth import StoredIStudentSessionProvider
+    from urfu_mcp.istudent.session_store import create_istudent_session_store
+
+    try:
+        provider = StoredIStudentSessionProvider(create_istudent_session_store())
+    except CredentialStoreError:
+        raise SetupError("Не удалось получить доступ к системному keyring.") from None
+
+    async def check() -> bool:
+        try:
+            await provider.get_session(person_id)
+            return True
+        except Exception:  # noqa: BLE001 - upstream/backend errors may contain secrets
+            return False
+        finally:
+            await provider.aclose()
+
+    try:
+        return asyncio.run(check())
+    except Exception:  # noqa: BLE001 - never expose backend errors in setup output
+        return False
 
 
 def _tokens_usable(config: AppConfig, tokens: object) -> bool:
