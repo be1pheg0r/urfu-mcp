@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from urfu_mcp.auth.credential_store import CredentialStoreError
 from urfu_mcp.auth.modeus_browser import run_modeus_login
 from urfu_mcp.auth.token_store import TokenStoreError, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, initialize_config, load_config
@@ -92,8 +93,13 @@ class DefaultSetupServices:
         try:
             config = load_config()
             tokens = create_token_store().load()
-        except (ConfigError, TokenStoreError):
+        except ConfigError:
             return False
+        except (CredentialStoreError, TokenStoreError):
+            raise SetupError(
+                "Не удалось получить доступ к системному keyring. Настройте безопасное "
+                "хранилище ключей в этой среде и повторите `urfu-mcp setup`."
+            ) from None
         return _tokens_usable(config, tokens)
 
     def authenticate(self) -> None:
@@ -104,8 +110,13 @@ class DefaultSetupServices:
         try:
             config = load_config()
             tokens = create_token_store().load()
-        except (ConfigError, TokenStoreError):
+        except ConfigError:
             raise SetupError("Local configuration or secure authentication could not be verified.") from None
+        except (CredentialStoreError, TokenStoreError):
+            raise SetupError(
+                "Не удалось получить доступ к системному keyring. Настройте безопасное "
+                "хранилище ключей в этой среде и повторите `urfu-mcp setup`."
+            ) from None
         if not _tokens_usable(config, tokens):
             raise SetupError("No valid Modeus sign-in was found. Rerun `urfu-mcp setup` to try again.")
 
@@ -241,7 +252,12 @@ class SetupOrchestrator:
             return 1
         except Exception as error:  # noqa: BLE001 - providers may raise unsafe details
             self.transition(SetupState.FAILED)
-            message = str(error) if isinstance(error, SetupError) else "подробности скрыты из соображений безопасности"
+            message = (
+                str(error)
+                if isinstance(error, SetupError)
+                else f"Непредвиденная ошибка типа {type(error).__name__}. "
+                "Перезапустите команду; если сбой повторится, сообщите этот тип ошибки."
+            )
             self.ui.failed(message)
             return 1
 
