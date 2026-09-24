@@ -45,6 +45,18 @@ class BRSPeriod(BRSContractModel):
         return self
 
 
+class BRSScoreNode(BRSContractModel):
+    """Observed weighted score expression and optional nested controls."""
+
+    name: str = Field(min_length=1)
+    earned_points: Decimal | None = None
+    maximum_points: Decimal | None = None
+    raw_points: Decimal | None = None
+    weight: Decimal | None = None
+    weighted_points: Decimal | None = None
+    children: tuple[BRSScoreNode, ...] = ()
+
+
 class BRSSubject(BRSContractModel):
     """One source-confirmed subject and its semantically mapped score values."""
 
@@ -53,6 +65,7 @@ class BRSSubject(BRSContractModel):
     maximum_points: Decimal | None
     points_status: BRSPointsStatus
     updated_at: datetime | None
+    sections: tuple[BRSScoreNode, ...] = ()
 
     @model_validator(mode="after")
     def points_agree_with_status(self) -> BRSSubject:
@@ -92,6 +105,18 @@ def _json_number(value: Decimal | None) -> int | float | None:
     return converted
 
 
+def _public_node(node: BRSScoreNode) -> dict[str, object]:
+    return {
+        "name": node.name,
+        "earned_points": _json_number(node.earned_points),
+        "maximum_points": _json_number(node.maximum_points),
+        "raw_points": _json_number(node.raw_points),
+        "weight": _json_number(node.weight),
+        "weighted_points": _json_number(node.weighted_points),
+        "children": [_public_node(child) for child in node.children],
+    }
+
+
 def public_brs_payload(
     result: BRSResult,
     *,
@@ -116,6 +141,8 @@ def public_brs_payload(
                 "maximum_points": _json_number(subject.maximum_points),
                 "points_status": subject.points_status.value,
                 "updated_at": subject.updated_at.isoformat() if subject.updated_at else None,
+                **({"sections": [_public_node(section) for section in subject.sections]}
+                   if subject.sections else {}),
             }
             for subject in selected_subjects
         ],

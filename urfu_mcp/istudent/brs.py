@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+from typing import Protocol
 
-from .brs_parser import BRSPageParser
-from .brs_source import BRSPageSource
+from .brs_parser import BRSPageParser, IStudentBRSDetailParser, IStudentBRSHTMLParser
+from .brs_source import BRSPageSource, BRSPeriodPages, BRSPeriodRequest
 from .errors import (
     AmbiguousSubject,
     InvalidUpstreamResponse,
@@ -14,6 +15,41 @@ from .errors import (
     UpstreamUnavailable,
 )
 from .public_models import BRSResult, BRSSubject
+
+
+class BRSPeriodSource(Protocol):
+    async def fetch_period(
+        self, identity: str, session: object, period: BRSPeriodRequest
+    ) -> BRSPeriodPages: ...
+
+
+class BRSPeriodReader:
+    """Atomic full-period read: every overview row requires its own verified detail."""
+
+    def __init__(self, source: BRSPeriodSource) -> None:
+        self._source = source
+
+    async def read(
+        self, identity: str, session: object, *, as_of: date, period: BRSPeriodRequest
+    ) -> BRSResult:
+        try:
+            pages = await self._source.fetch_period(identity, session, period)
+        except Exception:  # noqa: BLE001 - never surface request URLs or session details
+            raise UpstreamUnavailable("The iStudent BRS source is unavailable") from None
+        try:
+            overview = IStudentBRSHTMLParser().parse(
+                pages.overview, as_of=as_of, period=period.label
+            )
+            if len(overview.subjects) != len(pages.details):
+                raise InvalidUpstreamResponse("BRS details do not cover every subject")
+            parser = IStudentBRSDetailParser()
+            subjects = tuple(
+                row.model_copy(update={"sections": parser.parse(fragment)})
+                for row, fragment in zip(overview.subjects, pages.details, strict=True)
+            )
+            return overview.model_copy(update={"subjects": subjects})
+        except Exception:  # noqa: BLE001 - never expose raw score fragments
+            raise InvalidUpstreamResponse("The BRS response could not be parsed safely") from None
 
 
 def normalize_subject_name(value: str) -> str:

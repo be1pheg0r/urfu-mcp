@@ -10,7 +10,8 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .auth import IStudentIdentityProvider, IStudentSessionProvider
-from .brs import BRSReader, select_subjects
+from .brs import BRSPeriodReader, BRSReader, select_subjects
+from .brs_source import BRSPeriodRequest
 from .errors import (
     BRSError,
     IntegrationUnavailable,
@@ -37,16 +38,16 @@ def register_brs_tool(
     *,
     identity_provider: IStudentIdentityProvider,
     session_provider: IStudentSessionProvider,
-    reader: BRSReader | None,
+    reader: BRSPeriodReader | BRSReader | None,
     clock: Clock | None = None,
 ) -> None:
-    """Register `retrieve_brs(subject_name)` with identity/session fail-closed checks."""
+    """Register explicit-period BRS with identity/session fail-closed checks."""
     current_time = clock or (lambda: datetime.now(UTC))
 
-    async def retrieve_brs(subject_name: str) -> dict[str, object]:
+    async def retrieve_brs(subject_name: str, period: str | None = None) -> dict[str, object]:
         """Return BRS rows by exact normalized subject name or the reserved `all`."""
         try:
-            return await _retrieve_brs(subject_name)
+            return await _retrieve_brs(subject_name, period)
         except BRSError as error:
             # Convert domain failures into deliberate MCP tool errors so the SDK
             # returns safe actionable text instead of logging an exception trace.
@@ -56,10 +57,14 @@ def register_brs_tool(
             # public and logged failure fixed and omit the original traceback.
             raise ToolError("The BRS request could not be completed safely") from None
 
-    async def _retrieve_brs(subject_name: str) -> dict[str, object]:
+    async def _retrieve_brs(subject_name: str, period: str | None) -> dict[str, object]:
         selector = subject_name.strip()
         if not selector:
             raise InvalidInput("subject_name must not be blank")
+        try:
+            selected_period = BRSPeriodRequest.parse(period)  # type: ignore[arg-type]
+        except ValueError:
+            raise InvalidInput("Explicit period is required: YYYY/YYYY — Осенний or Весенний") from None
 
         try:
             identity = await identity_provider.current_person()
@@ -84,7 +89,12 @@ def register_brs_tool(
             )
 
         as_of = _current_local_date(current_time)
-        result = await reader.read(identity, session, as_of=as_of)
+        if isinstance(reader, BRSPeriodReader):
+            result = await reader.read(identity, session, as_of=as_of, period=selected_period)
+        else:
+            # Legacy injected reader remains for v0.8 callers/tests only. Runtime
+            # must wire BRSPeriodReader to assert detail completeness.
+            result = await reader.read(identity, session, as_of=as_of)
         selected = select_subjects(result, selector)
         return public_brs_payload(
             result,
@@ -98,7 +108,8 @@ def register_brs_tool(
         name="retrieve_brs",
         description=(
             "Retrieve the authenticated user's BRS subject by exact normalized name, "
-            "or use subject_name='all' for every source-confirmed subject."
+            "or use subject_name='all' for every subject. Supply explicit period "
+            "as 'YYYY/YYYY — Осенний' or 'YYYY/YYYY — Весенний'; no date default."
         ),
         structured_output=True,
     )

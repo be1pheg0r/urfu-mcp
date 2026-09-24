@@ -15,6 +15,7 @@ from .public_models import (
     BRSPeriod,
     BRSPointsStatus,
     BRSResult,
+    BRSScoreNode,
     BRSSubject,
 )
 
@@ -118,7 +119,7 @@ def _selected(select: _Node) -> str:
 class IStudentBRSHTMLParser:
     """Map observed numeric final-score cells; unknown point meanings fail closed."""
 
-    def parse(self, payload: str | bytes, *, as_of: date) -> BRSResult:
+    def parse(self, payload: str | bytes, *, as_of: date, period: str | None = None) -> BRSResult:
         # The source still owns selection; only reject contradictions we can prove.
         if isinstance(payload, bytes):
             if len(payload) > MAX_HTML_BYTES:
@@ -160,7 +161,9 @@ class IStudentBRSHTMLParser:
             raise InvalidUpstreamResponse("BRS HTML academic year is invalid")
         # September is demonstrably autumn in the current academic year. This
         # guard rejects a stale default, but does not choose periods for other dates.
-        if as_of.month == 9 and (first_year != as_of.year or semester != "Осенний"):
+        if period is not None and period != f"{year} — {semester}":
+            raise InvalidUpstreamResponse("BRS HTML selected period disagrees with request")
+        if period is None and as_of.month == 9 and (first_year != as_of.year or semester != "Осенний"):
             raise InvalidUpstreamResponse("BRS HTML selected period contradicts the request date")
         header = _single(
             [
@@ -238,3 +241,121 @@ class IStudentBRSHTMLParser:
             subjects=tuple(rows),
             completeness=BRSCompleteness.COMPLETE,
         )
+
+
+def _number(text: str) -> Decimal:
+    value = text.strip().replace(",", ".")
+    if not _SCORE.fullmatch(value):
+        raise InvalidUpstreamResponse("BRS detail score is unrecognized")
+    return Decimal(value)
+
+
+def _direct(node: _Node, cls: str) -> _Node:
+    return _single([child for child in node.children if cls in child.classes()])
+
+
+def _label(node: _Node) -> str:
+    label = node.text().strip().removesuffix(":").strip()
+    if not label:
+        raise InvalidUpstreamResponse("BRS detail label is missing")
+    return label
+
+
+def _expression(header: _Node) -> tuple[Decimal, Decimal, Decimal, str]:
+    title = _single([c for c in header.children if c.tag == "span" and not c.classes()])
+    name = _label(title)
+    factor = _single([c for c in title.children if "mobile-factor" in c.classes()])
+    match = re.fullmatch(r"\(коэффициент (\d+(?:[.,]\d+)?)\)", factor.all_text())
+    if not match:
+        raise InvalidUpstreamResponse("BRS detail coefficient is unrecognized")
+    expression = _direct(header, "score-expression-desktop")
+    pieces = [c.all_text() for c in expression.children]
+    if len(pieces) != 5 or pieces[1:2] != ["×"] or pieces[3:4] != ["="]:
+        raise InvalidUpstreamResponse("BRS detail expression is unrecognized")
+    raw, weight = _number(pieces[0]), _number(pieces[2])
+    weighted = _number(re.sub(r"\s+балл(?:ов|а)?\Z", "", pieces[4]))
+    mobile = _single([c for c in header.children if "score-expression-mobile" in c.classes()])
+    if weight != _number(match.group(1)) or weighted != _number(mobile.all_text()):
+        raise InvalidUpstreamResponse("BRS detail score variants disagree")
+    return raw, weight, weighted, name
+
+
+class IStudentBRSDetailParser:
+    """Parse observed lazy-loaded section/attestation/control hierarchy."""
+
+    def parse(self, payload: str | bytes) -> tuple[BRSScoreNode, ...]:
+        if isinstance(payload, bytes):
+            if len(payload) > MAX_HTML_BYTES:
+                raise InvalidUpstreamResponse("BRS detail exceeds the size limit")
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                raise InvalidUpstreamResponse("BRS detail encoding is unsupported") from None
+        if not isinstance(payload, str) or len(payload.encode("utf-8")) > MAX_HTML_BYTES:
+            raise InvalidUpstreamResponse("BRS detail exceeds the size limit")
+        tree = _HTMLTree()
+        tree.feed(payload)
+        tree.close()
+        sections: list[BRSScoreNode] = []
+        for top in tree.root.children:
+            if "discipline-detail" not in top.classes():
+                if "discipline-mark" not in top.classes():
+                    raise InvalidUpstreamResponse("BRS detail contains an unknown branch")
+                continue
+            headers = [n for n in top.children if "discipline-detail-header" in n.classes()]
+            if not headers:
+                raise InvalidUpstreamResponse("BRS detail section header is missing")
+            if not any("score-expression-desktop" in n.classes() for n in headers[0].descendants()):
+                if any("discipline-attestation" in n.classes() for n in top.descendants()):
+                    raise InvalidUpstreamResponse("BRS detail section score is missing")
+                if any("discipline-controls" in n.classes() for n in top.descendants()):
+                    raise InvalidUpstreamResponse("BRS detail contains unassigned controls")
+                if len(top.children) > 2:
+                    raise InvalidUpstreamResponse("BRS detail metadata is unrecognized")
+                continue
+            if not top.closed:
+                raise InvalidUpstreamResponse("BRS detail is truncated")
+            raw, weight, weighted, name = _expression(headers[0])
+            children: list[BRSScoreNode] = []
+            for att in top.children:
+                if att is headers[0]:
+                    continue
+                if "discipline-attestation" not in att.classes():
+                    raise InvalidUpstreamResponse("BRS section contains an unknown branch")
+                if not att.closed:
+                    raise InvalidUpstreamResponse("BRS attestation is truncated")
+                a_raw, a_weight, a_weighted, a_name = _expression(
+                    _direct(att, "discipline-attestation-header")
+                )
+                controls: list[BRSScoreNode] = []
+                if any(c is not _direct(att, "discipline-attestation-header") and "discipline-controls" not in c.classes() for c in att.children):
+                    raise InvalidUpstreamResponse("BRS attestation contains an unknown branch")
+                for group in [c for c in att.children if "discipline-controls" in c.classes()]:
+                    if group.own_text and "".join(group.own_text).strip():
+                        raise InvalidUpstreamResponse("BRS controls contain unassigned text")
+                    for control in group.children:
+                        spans = [c for c in control.children if c.tag == "span"]
+                        if len(spans) != 2 or "score-expression" not in spans[1].classes():
+                            raise InvalidUpstreamResponse("BRS control structure is unrecognized")
+                        maximum = _single([c for c in spans[1].children if c.tag == "strong"])
+                        pattern = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+из\s*балл(?:ов|а)?", spans[1].text())
+                        if not pattern:
+                            raise InvalidUpstreamResponse("BRS control score is unrecognized")
+                        controls.append(BRSScoreNode(
+                            name=_label(spans[0]), earned_points=_number(pattern.group(1)),
+                            maximum_points=_number(maximum.all_text()), raw_points=None,
+                            weight=None, weighted_points=None, children=(),
+                        ))
+                children.append(BRSScoreNode(
+                    name=a_name, earned_points=None, maximum_points=None,
+                    raw_points=a_raw, weight=a_weight, weighted_points=a_weighted,
+                    children=tuple(controls),
+                ))
+            sections.append(BRSScoreNode(
+                name=name, earned_points=None, maximum_points=None,
+                raw_points=raw, weight=weight, weighted_points=weighted,
+                children=tuple(children),
+            ))
+        if not sections:
+            raise InvalidUpstreamResponse("BRS detail has no verified sections")
+        return tuple(sections)
