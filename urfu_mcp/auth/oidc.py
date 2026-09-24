@@ -119,7 +119,7 @@ class OidcLogin:
 class OidcTokens:
     """Validated tokens returned distinctly; repr never includes token material."""
 
-    access_token: str = field(repr=False)
+    access_token: str | None = field(repr=False)
     id_token: str = field(repr=False)
     token_type: str
     expires_at: float | None

@@ -40,14 +40,14 @@ class ScheduleNormalizer:
         payload = cls._decode(raw)
         if not isinstance(payload, Mapping):
             raise InvalidUpstreamResponse("response must be a JSON object")
-        events_data = payload.get("events")
-        if not isinstance(events_data, list):
-            raise InvalidUpstreamResponse("response must contain an events list")
         embedded = payload.get("_embedded", {})
         if embedded is None:
             embedded = {}
         if not isinstance(embedded, Mapping):
             raise InvalidUpstreamResponse("_embedded must be an object")
+        events_data = payload.get("events") if "events" in payload else embedded.get("events")
+        if not isinstance(events_data, list):
+            raise InvalidUpstreamResponse("response must contain an events list")
         page = payload.get("page")
         cls._validate_page(page, len(events_data))
 

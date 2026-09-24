@@ -13,7 +13,10 @@ dependencies = [
     "keyring>=25.7,<26",
     "mcp>=2,<3",           # Official MCP server SDK
     "pydantic>=2.10,<3",   # Validation of normalized Modeus data
+    "playwright>=1.52,<2", # Browser-based Modeus SSO session
     "PyYAML>=6,<7",        # Secure loading and generation of local server config
+    "tzdata>=2025.2,<2027", # IANA timezone database, including Windows
+    "psutil>=6,<9",
 ]
 
 [project.scripts]
@@ -31,6 +34,7 @@ dev = [
     "ruff>=0.13,<1",
     "mypy>=1.18,<2",
     "types-PyYAML>=6,<7",
+    "types-psutil>=6,<9",
 ]
 
 # SfeduSchedule is a Git submodule / .NET sidecar, not a Python dependency. Python's zoneinfo

@@ -1,56 +1,31 @@
 # Пример всех параметров config.yaml; описания находятся в комментариях.
-# При первом запуске `urfu-mcp init` создаёт config.yaml с рабочими безопасными
-# значениями по умолчанию. Секреты и person_id в конфиг не записываются.
+# При первом запуске `urfu-mcp init` создаёт config.yaml с безопасными значениями.
+# Секреты и person_id в конфиг не записываются.
 
 server:
   # Имя MCP-сервера, объявляемое клиенту.
   name: urfu-mcp
 
 auth:
-  # HTTPS issuer OIDC-провайдера. Указать значение выданного УрФУ клиента;
-  # сервер не угадывает issuer и не заявляет поддержку неподтверждённого провайдера.
   issuer: null
-  # Публичный client_id зарегистрированного native/public OIDC-клиента.
   client_id: null
-  # Зарегистрированный loopback redirect URI для браузерного входа.
   redirect_uri: http://127.0.0.1:43123/callback
-  # Имя claim в проверенном ID token, содержащего UUID person_id.
-  # Сам UUID извлекается после входа и хранится в системном keyring.
   person_id_claim: person_id
-  # Выберите id_token либо access_token только после проверки контракта вашего API.
-  # null намеренно не выбирает токен; запуск без явного выбора завершится отказом.
   token_kind: null
-  # Максимальное ожидание локального callback авторизации, секунды (1–1800).
   callback_timeout_seconds: 300
-  # Таймаут запроса OIDC metadata/JWKS, секунды (0–60).
   metadata_timeout_seconds: 10
-  # Максимальный размер одного ответа OIDC metadata/JWKS, байты (1024–10000000).
   metadata_max_bytes: 1000000
-  # Срок действия одноразовой PKCE-транзакции, секунды (30–3600).
   transaction_ttl_seconds: 600
 
-sidecar:
-  # Loopback URL локально запущенного SfeduSchedule; удалённые адреса запрещены.
-  base_url: http://127.0.0.1:8080
-  # Ключ доступа к локальному person-search API. `urfu-mcp init` генерирует
-  # случайное значение автоматически. Если пример копируется вручную, замените
-  # placeholder и задайте то же значение sidecar-сервису.
-  api_key: REPLACE_WITH_THE_SAME_RANDOM_KEY_CONFIGURED_FOR_SIDECAR # pragma: allowlist secret
-  # Таймаут HTTP-запросов к sidecar, секунды (0–120).
+modeus_http:
+  # Ограничения прямых HTTPS-запросов только к официальному Modeus host.
   timeout_seconds: 10.0
-  # Верхняя граница размера ответа sidecar, байты (1024–20000000).
   max_response_bytes: 2000000
-  # Размер страницы запроса расписания (1–5000).
   event_page_size: 1000
-  # Размер страницы поиска человека (1–100).
   person_page_size: 50
-  # Максимум страниц при полном поиске человека (1–100).
   person_max_pages: 10
 
 schedule:
-  # IANA timezone, используемый для границ локальных дат расписания.
   timezone: Asia/Yekaterinburg
-  # Максимальное число календарных дней в одном запросе (1–31).
   max_days: 14
-  # Максимальное количество человек в одном запросе расписания (1–10).
   max_subjects: 3
