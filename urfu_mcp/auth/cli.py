@@ -21,11 +21,15 @@ from urfu_mcp.config import (
     load_config,
     update_auth_settings,
 )
+from urfu_mcp.setup import run_setup
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="urfu-mcp")
     commands = parser.add_subparsers(dest="command")
+    setup_command = commands.add_parser("setup", help="configure and verify URFU-MCP")
+    setup_command.add_argument("--no-color", action="store_true", help="disable terminal colors")
+    setup_command.add_argument("--non-interactive", action="store_true", help="skip terminal confirmation")
     commands.add_parser("init", help="create config.yaml with safe defaults")
     commands.add_parser("start", help="run the managed MCP stdio server")
     commands.add_parser("stop", help="stop only the recorded managed MCP process")
@@ -60,6 +64,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print("config.yaml is ready. Run `urfu-mcp auth` to sign in.")
         return 0
+
+    if options.command == "setup":
+        return run_setup(
+            no_color=options.no_color,
+            non_interactive=options.non_interactive,
+        )
 
     if options.command in {"start", "stop"}:
         from urfu_mcp import process_manager
