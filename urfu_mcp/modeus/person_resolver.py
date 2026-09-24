@@ -13,8 +13,12 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from .errors import (AmbiguousPerson, IncompleteResult,
-                     InvalidUpstreamResponse, PersonNotFound)
+from .errors import (
+    AmbiguousPerson,
+    IncompleteResult,
+    InvalidUpstreamResponse,
+    PersonNotFound,
+)
 from .models import NormalizedModel, PersonCandidate
 
 

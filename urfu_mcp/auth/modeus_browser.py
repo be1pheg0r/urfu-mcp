@@ -28,6 +28,11 @@ from urfu_mcp.auth.credential_store import (
 from urfu_mcp.auth.oidc import _ALLOWED_ID_TOKEN_ALGORITHMS, OidcTokens
 from urfu_mcp.auth.token_store import create_token_store
 from urfu_mcp.config import update_auth_settings
+from urfu_mcp.istudent.session_auth import validate_istudent_token
+from urfu_mcp.istudent.session_store import (
+    IStudentSessionRecord,
+    create_istudent_session_store,
+)
 
 TRUSTED_OIDC_ISSUER = "https://sso.urfu.ru/adfs"
 _TRUSTED_MODEUS_AUTHORITY = "https://urfu-auth.modeus.org/oauth2/authorize"
@@ -55,6 +60,7 @@ class BrowserOidcSession:
     expires_at: float
     refresh_token: str | None = field(default=None, repr=False)
     oidc_metadata: dict[str, Any] | None = field(default=None, repr=False)
+    istudent_cookies: dict[str, str] | None = field(default=None, repr=False)
 
     @property
     def authority(self) -> str:
@@ -447,25 +453,8 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
     stage = "opening browser session"
     try:
         session = _open_browser_session()
-        stage = "discovering identity-provider metadata"
-        metadata = session.oidc_metadata
-        if metadata is None and session.authority == TRUSTED_OIDC_ISSUER:
-            metadata = fetch_oidc_metadata(TRUSTED_OIDC_ISSUER)
-        if metadata is None:
-            raise ModeusAuthenticationError(
-                "No trusted OIDC discovery document was captured during sign-in"
-            )
-        stage = "validating Modeus tokens"
-        tokens = validate_oidc_session(session, metadata)
-        stage = "storing tokens in the system keyring"
-        create_token_store().save(tokens)
-        stage = "updating local configuration"
-        update_auth_settings(
-            config_path,
-            issuer=str(metadata["issuer"]),
-            client_id=session.client_id,
-            token_kind="id_token",
-        )
+        stage = "validating and storing Modeus tokens"
+        _persist_modeus_session(session, config_path)
     except ModeusAuthenticationError as error:
         print(f"Modeus sign-in failed while {stage}: {error}")
         return False
@@ -479,7 +468,97 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
     return True
 
 
-def _open_browser_session() -> BrowserOidcSession:
+def run_unified_login(config_path: str = "config.yaml") -> bool:
+    """Verify both same-context sessions, then persist them after explicit consent."""
+    stage = "opening browser session"
+    try:
+        session = _open_browser_session(visit_istudent=True)
+        stage = "validating iStudent session"
+        tokens = validate_oidc_session(session, session.oidc_metadata or {})
+        cookies = session.istudent_cookies
+        if cookies is None:
+            raise ModeusAuthenticationError("iStudent session cookies are missing")
+        claims = validate_istudent_token(cookies["keycloakAccessToken"], now=time.time())
+        subject = claims.get("sub")
+        expiry = claims.get("exp")
+        if not isinstance(subject, str) or not subject or type(expiry) not in (int, float):
+            raise ModeusAuthenticationError("iStudent token identity is invalid")
+        response = _fetch_protected_istudent_page(cookies)
+        if not _looks_like_protected_brs(response.text):
+            raise ModeusAuthenticationError("iStudent protected BRS page was not verified")
+        print(
+            "Both signed-in app sessions came from the same fresh SSO browser context. "
+            "Their account identifiers are not assumed to match. Do both sessions "
+            "belong to you? Type YES to save them securely: ", end="", flush=True
+        )
+        if input().strip() != "YES":
+            print("Unified sign-in cancelled; no session was saved.")
+            return False
+        stage = "saving verified sessions"
+        record = IStudentSessionRecord(
+            modeus_person_id=cast(str, tokens.person_id),
+            istudent_subject=subject,
+            access_token=cookies["keycloakAccessToken"],
+            php_session_id=cookies["PHPSESSID"],
+            expires_at=min(cast(float, expiry), time.time() + 900),
+        )
+        create_token_store().save(tokens)
+        update_auth_settings(config_path, issuer=str((session.oidc_metadata or {})["issuer"]),
+                             client_id=session.client_id, token_kind="id_token")
+        create_istudent_session_store().save(record)
+    except Exception as error:  # noqa: BLE001 - backend details may contain secrets
+        diagnostic = str(error) if isinstance(error, ModeusAuthenticationError) else type(error).__name__
+        print(f"Unified sign-in incomplete while {stage} ({diagnostic}); details suppressed.")
+        return False
+    print("Unified sign-in completed; verified sessions were stored securely.")
+    return True
+
+
+def _fetch_protected_istudent_page(cookies: Mapping[str, str]) -> httpx.Response:
+    """Fetch only the fixed protected BRS page after the browser has closed."""
+    url = "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs"
+    try:
+        with httpx.Client(follow_redirects=False, timeout=20) as client:
+            response = client.get(url, headers={
+                "Cookie": f"PHPSESSID={cookies['PHPSESSID']}; keycloakAccessToken={cookies['keycloakAccessToken']}",
+                "Accept": "text/html",
+                "User-Agent": "urfu-mcp/0.1",
+            })
+    except httpx.HTTPError:
+        raise ModeusAuthenticationError("iStudent protected page request failed") from None
+    if response.status_code != 200:
+        raise ModeusAuthenticationError("iStudent protected page returned an invalid status")
+    if not response.headers.get("content-type", "").lower().startswith("text/html"):
+        raise ModeusAuthenticationError("iStudent protected page returned an invalid content type")
+    return response
+
+
+def _looks_like_protected_brs(html: str) -> bool:
+    return all(marker in html for marker in (
+        'id="year-select"', 'id="semester-select"', 'class="disciplines-list-header"',
+        'class="discipline-outer-container"',
+    )) and "<html" in html.lower()
+
+
+def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> None:
+    metadata = session.oidc_metadata
+    if metadata is None and session.authority == TRUSTED_OIDC_ISSUER:
+        metadata = fetch_oidc_metadata(TRUSTED_OIDC_ISSUER)
+    if metadata is None:
+        raise ModeusAuthenticationError(
+            "No trusted OIDC discovery document was captured during sign-in"
+        )
+    tokens = validate_oidc_session(session, metadata)
+    create_token_store().save(tokens)
+    update_auth_settings(
+        config_path,
+        issuer=str(metadata["issuer"]),
+        client_id=session.client_id,
+        token_kind="id_token",
+    )
+
+
+def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession:
     """Use a visible Chromium window so the user can complete SSO and MFA."""
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -493,49 +572,126 @@ def _open_browser_session() -> BrowserOidcSession:
     except CredentialStoreError:
         credentials = None
 
+    stage = ["playwright_startup"]
+    try:
+        return _open_browser_session_at_stage(
+            sync_playwright, credentials, visit_istudent, PlaywrightTimeoutError, stage
+        )
+    except Exception as error:  # noqa: BLE001 - suppress browser exception details
+        raise ModeusAuthenticationError(
+            f"Browser session failed at stage {stage[0]} ({type(error).__name__})"
+        ) from None
+
+
+def _open_browser_session_at_stage(
+    sync_playwright: Any, credentials: Any, visit_istudent: bool,
+    PlaywrightTimeoutError: type[Exception], stage: list[str],
+) -> BrowserOidcSession:
     with sync_playwright() as playwright:
         browser = _launch_chromium(playwright)
         captured_metadata: list[dict[str, Any]] = []
         try:
-            page = browser.new_page()
-            page.on(
-                "response",
-                lambda response: _capture_oidc_metadata(response, captured_metadata),
-            )
-            page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
-            if credentials is not None:
-                _fill_saved_credentials(page, credentials)
-            print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
+            context = browser.new_context()
             try:
-                page.wait_for_function(
-                    "() => { const hasOidc = s => Object.keys(s).some("
-                    "key => key.startsWith('oidc.user:')); "
-                    "return location.hostname === 'urfu.modeus.org' && "
-                    "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
-                    timeout=_AUTH_TIMEOUT * 1000,
+                page = context.new_page()
+                page.on(
+                    "response",
+                    lambda response: _capture_oidc_metadata(response, captured_metadata),
                 )
-            except PlaywrightTimeoutError:
-                raise ModeusAuthenticationError(
-                    "No Modeus OIDC session appeared after sign-in. "
-                    "The current sign-in session format may not be supported."
-                ) from None
-            storage = page.evaluate(
-                "() => ({localStorage: Object.fromEntries(Object.keys(localStorage).map("
-                "key => [key, localStorage.getItem(key)])), "
-                "sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map("
-                "key => [key, sessionStorage.getItem(key)]))})"
-            )
+                stage[0] = "modeus_page_goto"
+                page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
+                if credentials is not None:
+                    _fill_saved_credentials(page, credentials)
+                print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
+                try:
+                    stage[0] = "modeus_oidc_wait"
+                    page.wait_for_function(
+                        "() => { const hasOidc = s => Object.keys(s).some("
+                        "key => key.startsWith('oidc.user:')); "
+                        "return location.hostname === 'urfu.modeus.org' && "
+                        "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
+                        timeout=_AUTH_TIMEOUT * 1000,
+                    )
+                except PlaywrightTimeoutError:
+                    raise ModeusAuthenticationError(
+                        "No Modeus OIDC session appeared after sign-in. "
+                        "The current sign-in session format may not be supported."
+                    ) from None
+                stage[0] = "browser_storage_evaluate"
+                storage = page.evaluate(
+                    "() => ({localStorage: Object.fromEntries(Object.keys(localStorage).map("
+                    "key => [key, localStorage.getItem(key)])), "
+                    "sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map("
+                    "key => [key, sessionStorage.getItem(key)]))})"
+                )
+                if (
+                    not isinstance(storage, dict)
+                    or not isinstance(storage.get("localStorage"), dict)
+                    or not isinstance(storage.get("sessionStorage"), dict)
+                ):
+                    raise ModeusAuthenticationError(
+                        "Modeus did not return an authenticated browser session"
+                    )
+                session = parse_browser_storage(storage["localStorage"], storage["sessionStorage"])
+                metadata = _select_oidc_metadata(captured_metadata, session.id_token, session.client_id)
+                if visit_istudent:
+                    # Same page/context: SSO may reuse login, but an interactive
+                    # redirect is not proof that its session can be persisted.
+                    stage[0] = "istudent_page_goto"
+                    page.goto(
+                        "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
+                        wait_until="load", timeout=60_000,
+                    )
+                    try:
+                        stage[0] = "istudent_wait_for_url"
+                        page.wait_for_url(
+                            "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
+                            timeout=_AUTH_TIMEOUT * 1000,
+                        )
+                    except PlaywrightTimeoutError:
+                        raise ModeusAuthenticationError(
+                            "iStudent SSO did not complete; manual login or MFA may be required"
+                        ) from None
+                    stage[0] = "cookie_capture"
+                    istudent_cookies = _capture_istudent_cookies(context)
+                else:
+                    istudent_cookies = None
+                return replace(
+                    session, oidc_metadata=metadata, istudent_cookies=istudent_cookies
+                )
+            finally:
+                if sys.exc_info()[0] is None:
+                    stage[0] = "context_cleanup"
+                context.close()
         finally:
             browser.close()
-    if (
-        not isinstance(storage, dict)
-        or not isinstance(storage.get("localStorage"), dict)
-        or not isinstance(storage.get("sessionStorage"), dict)
-    ):
-        raise ModeusAuthenticationError("Modeus did not return an authenticated browser session")
-    session = parse_browser_storage(storage["localStorage"], storage["sessionStorage"])
-    metadata = _select_oidc_metadata(captured_metadata, session.id_token, session.client_id)
-    return replace(session, oidc_metadata=metadata)
+
+
+def _capture_istudent_cookies(context: Any) -> dict[str, str]:
+    """Capture only the exact protected iStudent host's required session cookies."""
+    cookies = context.cookies("https://istudent.urfu.ru/")
+    if not isinstance(cookies, list):
+        raise ModeusAuthenticationError("iStudent session cookies are invalid")
+    required = {"PHPSESSID", "keycloakAccessToken"}
+    selected: dict[str, str] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = cookie.get("name")
+        if name not in required:
+            continue
+        if (
+            cookie.get("domain") != "istudent.urfu.ru"
+            or cookie.get("path") != "/"
+            or name in selected
+            or not isinstance(cookie.get("value"), str)
+            or not cookie["value"]
+        ):
+            raise ModeusAuthenticationError("iStudent session cookies are invalid")
+        selected[name] = cookie["value"]
+    if set(selected) != required:
+        raise ModeusAuthenticationError("iStudent session cookies are missing")
+    return selected
 
 
 def _launch_chromium(playwright: Any) -> Any:
@@ -559,7 +715,19 @@ def _launch_chromium(playwright: Any) -> Any:
 
 def _fill_saved_credentials(page: Any, credentials: CredentialRecord) -> None:
     """Fill only the official URFU ADFS login form with keyring-stashed values."""
-    if urlsplit(page.url).hostname != "sso.urfu.ru":
+    parsed = urlsplit(page.url)
+    try:
+        trusted = (
+            parsed.scheme == "https"
+            and parsed.hostname == "sso.urfu.ru"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path == "/adfs/ls/"
+        )
+    except ValueError:
+        trusted = False
+    if not trusted:
         return
     username = page.locator("form#loginForm input[name='UserName']")
     password = page.locator("form#loginForm input[name='Password']")

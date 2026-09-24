@@ -14,8 +14,15 @@ from mcp.server import MCPServer
 
 from urfu_mcp.auth.token_store import TokenStore, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, load_config
-from urfu_mcp.istudent.auth import UnconfiguredIStudentSessionProvider
+from urfu_mcp.istudent.auth import (
+    IStudentSessionProvider,
+    UnconfiguredIStudentSessionProvider,
+)
+from urfu_mcp.istudent.brs import BRSPeriodReader
+from urfu_mcp.istudent.brs_source import IStudentBRSPageSource
 from urfu_mcp.istudent.mcp_tools import register_brs_tool
+from urfu_mcp.istudent.session_auth import StoredIStudentSessionProvider
+from urfu_mcp.istudent.session_store import create_istudent_session_store
 from urfu_mcp.modeus.authorization import ResolvedPersonAuthorizer
 from urfu_mcp.modeus.direct_client import ModeusDirectClient
 from urfu_mcp.modeus.errors import NotAuthenticated
@@ -52,9 +59,14 @@ class _TokenSupplier:
 class Runtime:
     server: MCPServer
     client: httpx.AsyncClient
+    istudent_session_provider: StoredIStudentSessionProvider | None = None
 
     async def aclose(self) -> None:
-        await self.client.aclose()
+        try:
+            if self.istudent_session_provider is not None:
+                await self.istudent_session_provider.aclose()
+        finally:
+            await self.client.aclose()
 
 
 def build_server(
@@ -62,6 +74,8 @@ def build_server(
     *,
     token_store: TokenStore | None = None,
     client: httpx.AsyncClient | None = None,
+    istudent_session_provider: IStudentSessionProvider | None = None,
+    brs_reader: BRSPeriodReader | None = None,
 ) -> MCPServer:
     """Build the MCP server from YAML and authenticated identity in the keyring."""
     token_kind = getattr(config.auth, "token_kind", None)
@@ -114,13 +128,18 @@ def build_server(
         person_authorizer=ResolvedPersonAuthorizer(),
         timezone_name=config.schedule.timezone,
     )
-    # The BRS contract is registered, but no protected iStudent auth/source
-    # adapter is available until its real session and response schema are verified.
+    # The default remains deliberately unavailable. An explicit session provider
+    # opts into the verified, bounded read-only page source; tests and callers may
+    # inject a period reader directly to control its transport.
+    session_provider = istudent_session_provider or UnconfiguredIStudentSessionProvider()
+    period_reader = brs_reader
+    if period_reader is None and istudent_session_provider is not None:
+        period_reader = BRSPeriodReader(IStudentBRSPageSource())
     register_brs_tool(
         server,
         identity_provider=_IdentityProvider(str(parsed_person_id)),
-        session_provider=UnconfiguredIStudentSessionProvider(),
-        reader=None,
+        session_provider=session_provider,
+        reader=period_reader,
     )
     return server
 
@@ -135,17 +154,48 @@ def create_runtime(
     """Load/generate YAML config and create the stdio server/client pair."""
     app_config = config or load_config(config_path)
     http_client = client or httpx.AsyncClient(timeout=app_config.modeus_http.timeout_seconds)
+    provider = None
     try:
+        _validate_runtime_auth(app_config, token_store)
+        provider = StoredIStudentSessionProvider(create_istudent_session_store())
         server = build_server(
             app_config,
             token_store=token_store,
             client=http_client,
+            istudent_session_provider=provider,
         )
     except Exception:
-        if client is None:
-            asyncio.run(http_client.aclose())
+        async def close_failed_setup() -> None:
+            try:
+                if provider is not None:
+                    await provider.aclose()
+            finally:
+                await http_client.aclose()
+        asyncio.run(close_failed_setup())
         raise
-    return Runtime(server, http_client)
+    return Runtime(server, http_client, provider)
+
+
+def _validate_runtime_auth(config: AppConfig, token_store: TokenStore | None) -> None:
+    """Validate Modeus token selection and identity before iStudent store access."""
+    token_kind = getattr(config.auth, "token_kind", None)
+    if token_kind not in {"id_token", "access_token"}:
+        raise NotAuthenticated("No supported Modeus token kind is configured")
+    try:
+        tokens = (token_store or create_token_store()).load()
+    except Exception:  # noqa: BLE001 - keyring errors may contain secret-bearing details
+        raise NotAuthenticated("Could not load stored Modeus token") from None
+    if tokens is None or tokens.expires_at is None or tokens.expires_at <= time.time():
+        raise NotAuthenticated("No unexpired stored Modeus token is available")
+    token = getattr(tokens, token_kind, None)
+    if not isinstance(token, str) or not token:
+        raise NotAuthenticated("The selected stored Modeus token is unavailable")
+    try:
+        person_id = UUID(tokens.person_id)
+    except (ValueError, TypeError, AttributeError):
+        raise NotAuthenticated("Stored authentication has no valid person identity") from None
+    if person_id.int == 0:
+        raise NotAuthenticated("Stored authentication has no valid person identity")
 
 
 def serve(config_path: str | Path = "config.yaml") -> int:

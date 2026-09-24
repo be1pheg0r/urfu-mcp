@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from urfu_mcp.auth.credential_store import CredentialStoreError
-from urfu_mcp.auth.modeus_browser import run_modeus_login
+from urfu_mcp.auth.modeus_browser import run_unified_login
 from urfu_mcp.auth.token_store import TokenStoreError, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, initialize_config, load_config
 from urfu_mcp.wizard_fire import play_flame_logo
@@ -101,11 +101,16 @@ class DefaultSetupServices:
                 "Не удалось получить доступ к системному keyring. Настройте безопасное "
                 "хранилище ключей в этой среде и повторите `urfu-mcp setup`."
             ) from None
-        return _tokens_usable(config, tokens)
+        if not _tokens_usable(config, tokens):
+            return False
+        # No iStudent keyring record may be recognized until its signed identity,
+        # cookie scope and expiry have been verified against the Modeus identity.
+        # A Modeus-only record must never mark both clients authenticated.
+        return False
 
     def authenticate(self) -> None:
-        if not run_modeus_login():
-            raise SetupError("Modeus sign-in did not complete. You can rerun `urfu-mcp setup`.")
+        if not run_unified_login():
+            raise SetupError("iStudent authentication is not verified; setup is incomplete.")
 
     def verify(self) -> None:
         try:
@@ -120,6 +125,7 @@ class DefaultSetupServices:
             ) from None
         if not _tokens_usable(config, tokens):
             raise SetupError("No valid Modeus sign-in was found. Rerun `urfu-mcp setup` to try again.")
+        raise SetupError("iStudent authentication cannot be verified; setup is incomplete.")
 
 
 def _tokens_usable(config: AppConfig, tokens: object) -> bool:
