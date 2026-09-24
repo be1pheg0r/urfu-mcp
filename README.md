@@ -1,16 +1,16 @@
 # urfu-mcp
 
-## Unified auth status (fail-closed)
+## Единый вход в Modeus и iStudent
 
-`urfu-mcp auth` opens **one explicit Playwright context** and visits Modeus followed by the fixed iStudent BRS tile in the same page. URFU SSO may reuse the interactive login; MFA or cancellation still requires user action. Modeus SPA ID tokens are validated against trusted metadata and saved only to the OS keyring. **The command currently exits nonzero even if the iStudent page loads**: protected-page navigation alone does not prove a safely reusable iStudent session. No iStudent cookie/token is copied to keyring, Modeus tokens are never passed to iStudent, and BRS runtime remains unavailable. `setup` likewise cannot report ready with only a Modeus token. Do not run a second `auth` expecting to repair the missing contract.
+`urfu-mcp auth` uses two browser tabs in one explicit Playwright context: Modeus and the fixed iStudent BRS page share a university SSO sign-in. Modeus ID tokens and the separate iStudent session are independently validated; a fresh HTTPS request verifies the protected BRS page before saving the short-lived iStudent session in the OS keyring. The program asks for explicit confirmation that both accounts belong to you. `setup` only reports success when both saved sessions still validate. Modeus tokens are never sent to iStudent.
 
-In an authorized browser on September 24, 2026, iStudent redirected through the official `keys.urfu.ru` OIDC `istudent` code/PKCE client and `/student/keycloak-login` callback. The browser held host-scoped session cookies `keycloakAccessToken` and `PHPSESSID`, without persistent cookie expiry; neither had the Secure attribute. The first contained JWT-shaped claims including `azp=istudent` and `exp`, but no `aud`. The iStudent person GUID did **not** match Modeus's `person_id`; other sampled identifier fields did not match either. These observations are not a validated signature, cross-client identity mapping, server-side PHP-session lifetime or renewal guarantee. Until those are established in a consented native auth flow, iStudent session persistence and an authenticated source must stay disabled. Windows Credential Manager and WSL keyrings are distinct: this WSL environment has no viable secure keyring backend, and no Windows end-to-end sign-in was performed. See `.codex/architecture/unified-auth.md`.
+The iStudent JWT signature is checked against its official realm, and the stored cookie pair is scoped to the exact HTTPS origin. Its lifetime is conservatively capped at 15 minutes because the PHP session lifetime is not known. Windows Credential Manager and WSL keyrings are distinct; authenticate and launch MCP on the same OS. The latest native-Windows `setup` attempt encountered an HTML-marker false negative, now fixed with synthetic tests, but full native-Windows setup and an authenticated BRS MCP call still need an interactive retest. See `.codex/STATE.md`.
 
-## iStudent БРС: граница подтверждения
+## iStudent БРС
 
-`retrieve_brs(subject_name)` зарегистрирован, но пока возвращает безопасную ошибку недоступности. В собственной авторизованной браузерной сессии 24 сентября 2026 подтверждены защищённый HTML-список БРС, поля выбора группы/учебного года/семестра и колонки «Дисциплина», «Итоговый балл», «Итоговая оценка». Добавлен **отключённый от runtime** HTML-парсер проверенной числовой формы балла с обезличенными синтетическими тестами. Браузер по умолчанию показывал прошлый весенний семестр; для текущего осеннего понадобилось выбрать другой учебный год. Парсер сам период по дате не выбирает.
+`retrieve_brs(subject_name, period)` — третий MCP-инструмент, требует период вида `2026/2027 — Осенний` или `2025/2026 — Весенний`; `subject_name="all"` запрашивает все предметы выбранного периода. Результат включает секции, баллы и веса из защищённых страниц. Запросы идут только с отдельно проверенной iStudent-сессией; при истечении или несовпадении с локальной учётной записью инструмент отказывает в доступе.
 
-Отдельный SSO-клиент iStudent использует `keys.urfu.ru` (authorization code + PKCE), но автономный жизненный цикл его сессии — получение, привязка к пользователю, продление/истечение и cookie scope — **не подтверждён**. Нельзя переносить cookie из браузера в сервер или подставлять токен Modeus. Поэтому production source и MCP wiring не включены, живой вызов БРС через MCP не выполнялся. Следующий шаг: исследовать легитимный самостоятельный вход iStudent и правила выбора текущего семестра, затем проверить parser/source на своём аккаунте в памяти и выполнить read-only MCP stdio вызов. HTML, персональные предметы/баллы и значения секретов не сохранялись.
+Парсер и транспорт проверены синтетическими тестами; защищённая HTML-страница просмотрена с разрешения владельца без сохранения оценок и cookie. Сквозной вызов БРС через запущенный MCP-сервер на Windows пока не подтверждён: не путайте тесты с проверкой живых данных.
 
 ## Local Modeus MCP runtime
 
@@ -22,9 +22,9 @@ uv run urfu-mcp setup
 
 `uv run` автоматически подготовит синхронизированное окружение проекта по `pyproject.toml` и `uv.lock`, затем откроет wizard. Отдельные `uv sync`, `urfu-mcp init`, `urfu-mcp auth` и `urfu-mcp start` для первого запуска не нужны. Сам `uv` должен быть установлен заранее.
 
-`setup` is the intended first-run workflow, but currently **cannot complete** because a safe iStudent session contract has not been established. It may initialize `config.yaml` and authenticate Modeus, then returns a nonzero status rather than claiming both clients are ready. It does not launch the MCP server. `--non-interactive` skips the welcome confirmation and `--no-color` disables colors; redirected output is plain.
+`setup` создаёт `config.yaml`, выполняет общий вход в Modeus и iStudent и проверяет обе сессии. При ошибке возвращает ненулевой код и не запускает MCP-сервер. `--non-interactive` пропускает подтверждение приветствия, `--no-color` отключает цвет; перенаправленный вывод остаётся обычным текстом.
 
-On an interactive color terminal, the **URFU-MCP** greeting rises out of a brief ASCII flame effect. The fire is the existing `asciimatics.renderers.Fire` renderer, with `FigletText` as its heat source, displayed via Rich Live (no alternate screen); the static banner remains afterward. Narrow/short terminals skip the effect. Redirected output, `--no-color`, `NO_COLOR`, and `--non-interactive` immediately use a plain, animation-free banner without terminal control sequences or delays. Ctrl-C restores the cursor and cancels setup. The animation is only part of the `setup` CLI, never MCP stdio output. Source: [asciimatics fire sample](https://github.com/peterbrittain/asciimatics/blob/master/samples/fire.py); upstream [Apache-2.0 license](https://github.com/peterbrittain/asciimatics/blob/master/LICENSE). We use its published renderer API and do not copy the sample code.
+Визард показывает статичный баннер без анимации. При перенаправлении вывода он не добавляет управляющие последовательности терминала.
 
 When setup is complete, add `urfu-mcp` to your MCP client's server configuration and have that client launch `uv run urfu-mcp serve` (or the installed `urfu-mcp serve`). The stdio server must be launched by the MCP host. `urfu-mcp start` remains a foreground stdio alias for an MCP host, not a detached daemon.
 
@@ -32,7 +32,7 @@ When setup is complete, add `urfu-mcp` to your MCP client's server configuration
 
 `urfu-mcp init`, `urfu-mcp auth`, `urfu-mcp start`, `urfu-mcp stop`, `urfu-mcp serve`, `urfu-mcp auth oidc`, and `urfu-mcp auth credentials` remain available as explicit commands.
 
-`auth` visits Modeus and then iStudent in the same Chromium context. Complete URFU SSO/MFA when needed. It does not ask for issuer/client ID or password in the CLI. An explicitly saved application credential may fill the exact HTTPS ADFS login form; otherwise sign in manually. The current command returns nonzero after the visit because the iStudent session contract is not verified; only validated Modeus tokens may be stored.
+`auth` посещает Modeus и iStudent в одном Chromium-контексте. Завершите SSO/MFA в браузере при необходимости. Учётные данные приложения можно заранее сохранить в системном keyring; тогда заполнение формы ограничено точным официальным HTTPS-адресом. Команда откажет в успехе, если хотя бы одну из сессий не удалось проверить.
 
 After sign-in, the client reads the Modeus SPA's `oidc.user:*` session entry. It captures trusted Modeus app config or matching OIDC discovery metadata, then validates the ID-token signature, issuer, audience, expiry, and `person_id`. Modeus may provide only an ID token; absent access tokens remain absent. Tokens and identity are stored in the OS keyring. Authentication fails closed if trusted metadata is not observed.
 
@@ -42,4 +42,4 @@ The two schedule operations make bounded, in-process HTTPS requests directly to 
 
 `urfu-mcp auth oidc` remains the explicit generic PKCE flow. `urfu-mcp auth credentials` remains available for saving an account to the OS keyring.
 
-Contract and authentication tests use synthetic data. A direct authenticated Modeus schedule query previously returned HTTP 200, but the new Python runtime itself has not been live-integrated against Modeus.
+Contract and authentication tests use synthetic data. An authenticated native-Windows MCP stdio schedule query was verified against live Modeus on September 24, 2026; person search and an authenticated MCP BRS call are not yet live-verified.
