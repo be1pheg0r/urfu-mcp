@@ -4,7 +4,7 @@
 
 `urfu-mcp auth` uses two browser tabs in one explicit Playwright context: Modeus and the fixed iStudent BRS page share a university SSO sign-in. Modeus ID tokens and the separate iStudent session are independently validated; a fresh HTTPS request verifies the protected BRS page before saving the short-lived iStudent session in the OS keyring. `setup` only reports success when both saved sessions still validate. Modeus tokens are never sent to iStudent.
 
-The iStudent JWT signature is checked against its official realm, and the stored cookie pair is scoped to the exact HTTPS origin. Its lifetime is conservatively capped at 15 minutes because the PHP session lifetime is not known. Windows Credential Manager and WSL keyrings are distinct; authenticate and launch MCP on the same OS. The latest native-Windows `setup` attempt encountered an HTML-marker false negative, now fixed with synthetic tests, but full native-Windows setup and an authenticated BRS MCP call still need an interactive retest. See `.codex/STATE.md`.
+The iStudent JWT signature is checked against its official realm, and the stored cookie pair is scoped to the exact HTTPS origin. Its lifetime is conservatively capped at 15 minutes because the PHP session lifetime is not known. Windows Credential Manager and WSL keyrings are distinct; authenticate and launch MCP on the same OS. The latest native-Windows `setup` attempt reached session storage and then failed; bounded keyring storage and its Windows contract tests have since been fixed, but full interactive setup and an authenticated BRS MCP call still need a retest. See `.codex/STATE.md`.
 
 ## iStudent БРС
 
