@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("start", help="run the managed MCP stdio server")
     commands.add_parser("stop", help="stop only the recorded managed MCP process")
     commands.add_parser("credentials", help="store email and password securely")
+    commands.add_parser("login-saved", help="save credentials securely, then sign in through URFU SSO")
     commands.add_parser(
         "oidc", help="sign in using OIDC settings from config.yaml"
     )
@@ -70,6 +71,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_color=options.no_color,
             non_interactive=options.non_interactive,
         )
+
+    if options.command == "login-saved":
+        try:
+            email = input("Email: ").strip()
+            if not email:
+                print("Email must not be empty.", file=sys.stderr)
+                return 1
+            password = getpass.getpass("Password: ")
+            if not password.strip():
+                print("Password must not be empty.", file=sys.stderr)
+                return 1
+            create_credential_store().save(CredentialRecord(email=email, password=password))
+        except CredentialStoreError:
+            print("Could not store credentials in the system keyring.", file=sys.stderr)
+            return 1
+        except (EOFError, KeyboardInterrupt):
+            print("Credential entry cancelled.", file=sys.stderr)
+            return 1
+        print("Credentials stored securely; continuing with official URFU SSO.")
+        try:
+            load_config()
+        except ConfigError:
+            print("Could not read config.yaml safely.", file=sys.stderr)
+            return 1
+        return 0 if run_unified_login() else 1
 
     if options.command in {"start", "stop"}:
         from urfu_mcp import process_manager
