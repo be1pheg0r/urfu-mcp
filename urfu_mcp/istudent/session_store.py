@@ -104,8 +104,11 @@ class IStudentSessionStore:
                         or not isinstance(manifest["sha256"], str) or len(manifest["sha256"]) != 64
                         or any(c not in "0123456789abcdef" for c in manifest["sha256"])):
                     raise ValueError
-                chunks = [self._backend.get_password(self._service_name, f"part-{manifest['generation']}-{i}")
-                          for i in range(manifest["count"])]
+                try:
+                    chunks = [self._backend.get_password(self._service_name, f"part-{manifest['generation']}-{i}")
+                              for i in range(manifest["count"])]
+                except Exception:  # noqa: BLE001 - backend errors may contain secret values
+                    raise IStudentSessionStoreError("Could not load iStudent session securely") from None
                 if any(chunk is None or len(chunk) > _PART_SIZE for chunk in chunks):
                     raise ValueError
                 payload = "".join(chunk for chunk in chunks if chunk is not None)
@@ -118,6 +121,8 @@ class IStudentSessionStore:
                 raise ValueError
             record = IStudentSessionRecord(**data)
             _validate(record, now=time.time())
+        except IStudentSessionStoreError:
+            raise
         except (TypeError, ValueError, KeyError):
             raise IStudentSessionStoreError("Stored iStudent session is invalid or expired") from None
         if record.modeus_person_id != modeus_person_id:
