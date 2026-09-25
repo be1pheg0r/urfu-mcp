@@ -13,8 +13,8 @@ from urfu_mcp.auth.credential_store import (
     create_credential_store,
 )
 
-MANUAL_METHOD = "Browser sign-in (manual SSO/MFA)"
-SAVED_METHOD = "Use stashed credentials (automatic SSO)"
+MANUAL_METHOD = "OAuth (browser sign-in)"
+SAVED_METHOD = "Stashed credentials (automatic SSO)"
 
 
 def choose_authentication_method() -> str | None:
