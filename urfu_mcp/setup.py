@@ -19,6 +19,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 from urfu_mcp.auth.credential_store import CredentialStoreError
+from urfu_mcp.auth.method_picker import (
+    choose_authentication_method,
+    prepare_saved_credentials,
+)
 from urfu_mcp.auth.modeus_browser import run_unified_login
 from urfu_mcp.auth.token_store import TokenStoreError, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, initialize_config, load_config
@@ -48,7 +52,7 @@ class SetupServices(Protocol):
     def config_is_ready(self) -> bool: ...
     def initialize_config(self) -> None: ...
     def has_valid_auth(self) -> bool: ...
-    def authenticate(self) -> None: ...
+    def authenticate(self, credential_mode: str = "manual") -> None: ...
     def verify(self) -> None: ...
 
 
@@ -58,6 +62,7 @@ class SetupUIProtocol(Protocol):
     def ready(self) -> None: ...
     def failed(self, message: str) -> None: ...
     def cancelled(self) -> None: ...
+    def authentication_method(self) -> str | None: ...
 
 
 @dataclass(slots=True)
@@ -65,7 +70,9 @@ class DefaultSetupServices:
     """Application operations used by the setup state machine."""
 
     def preflight(self) -> None:
-        required = ("authlib", "httpx", "keyring", "mcp", "playwright", "pydantic", "yaml")
+        required = (
+            "authlib", "httpx", "keyring", "mcp", "playwright", "pydantic", "questionary", "yaml"
+        )
         if any(importlib.util.find_spec(module) is None for module in required):
             raise SetupError(
                 "Application dependencies are missing. Install the project first with `uv sync`."
@@ -106,8 +113,8 @@ class DefaultSetupServices:
         person_id = getattr(tokens, "person_id", None)
         return isinstance(person_id, str) and _istudent_session_ready(person_id)
 
-    def authenticate(self) -> None:
-        if not run_unified_login():
+    def authenticate(self, credential_mode: str = "manual") -> None:
+        if not run_unified_login(credential_mode=credential_mode):
             raise SetupError("iStudent authentication is not verified; setup is incomplete.")
 
     def verify(self) -> None:
@@ -212,6 +219,9 @@ class SetupUI:
         self.console.print(f"✓ {name}")
         return result
 
+    def authentication_method(self) -> str | None:
+        return choose_authentication_method()
+
     def ready(self) -> None:
         self.console.print(Panel(
             "Настройка завершена. Добавьте сервер `urfu-mcp` в конфигурацию вашего MCP-клиента "
@@ -272,7 +282,19 @@ class SetupOrchestrator:
             self.transition(SetupState.AUTH)
             authenticated = self.ui.step("Проверка входа в Modeus", self.services.has_valid_auth)
             if not authenticated:
-                self.ui.step("Вход через браузер URFU SSO", self.services.authenticate)
+                method = self.ui.authentication_method()
+                if method is None:
+                    self.transition(SetupState.CANCELLED)
+                    self.ui.cancelled()
+                    return 1
+                if method not in {"manual", "saved"}:
+                    raise SetupError("Invalid authentication method selected.")
+                if method == "saved" and not prepare_saved_credentials():
+                    raise SetupError("Saved credentials unavailable or entry cancelled.")
+                self.ui.step(
+                    "Вход через браузер URFU SSO",
+                    lambda: self.services.authenticate(method),
+                )
             self.transition(SetupState.VERIFICATION)
             self.ui.step("Локальная проверка", self.services.verify)
             self.ui.ready()
