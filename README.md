@@ -2,7 +2,7 @@
 
 ## Единый вход в Modeus и iStudent
 
-`urfu-mcp auth` uses two browser tabs in one explicit Playwright context: Modeus and the fixed iStudent BRS page share a university SSO sign-in. Modeus ID tokens and the separate iStudent session are independently validated; a fresh HTTPS request verifies the protected BRS page before saving the short-lived iStudent session in the OS keyring. The program asks for explicit confirmation that both accounts belong to you. `setup` only reports success when both saved sessions still validate. Modeus tokens are never sent to iStudent.
+`urfu-mcp auth` uses two browser tabs in one explicit Playwright context: Modeus and the fixed iStudent BRS page share a university SSO sign-in. Modeus ID tokens and the separate iStudent session are independently validated; a fresh HTTPS request verifies the protected BRS page before saving the short-lived iStudent session in the OS keyring. `setup` only reports success when both saved sessions still validate. Modeus tokens are never sent to iStudent.
 
 The iStudent JWT signature is checked against its official realm, and the stored cookie pair is scoped to the exact HTTPS origin. Its lifetime is conservatively capped at 15 minutes because the PHP session lifetime is not known. Windows Credential Manager and WSL keyrings are distinct; authenticate and launch MCP on the same OS. The latest native-Windows `setup` attempt encountered an HTML-marker false negative, now fixed with synthetic tests, but full native-Windows setup and an authenticated BRS MCP call still need an interactive retest. See `.codex/STATE.md`.
 
@@ -30,7 +30,7 @@ When setup is complete, add `urfu-mcp` to your MCP client's server configuration
 
 Репозиторий пока не публикуется как standalone PyPI-пакет: сначала нужен clone исходного кода и установленный `uv`. Команда `uv run` сама создаёт/синхронизирует окружение из проекта, поэтому отдельный `uv sync --all-groups` не нужен. .NET и SfeduSchedule submodule не требуются.
 
-`urfu-mcp init`, `urfu-mcp auth`, `urfu-mcp start`, `urfu-mcp stop`, `urfu-mcp serve`, `urfu-mcp auth oidc`, and `urfu-mcp auth credentials` remain available as explicit commands.
+`urfu-mcp init`, `urfu-mcp auth`, `urfu-mcp start`, `urfu-mcp stop`, `urfu-mcp serve`, `urfu-mcp auth oidc`, `urfu-mcp auth credentials`, and `urfu-mcp auth login-saved` remain available as explicit commands. Use `urfu-mcp auth login-saved` for one-step credential onboarding: enter the email, enter the password at the hidden prompt, then complete official SSO/MFA in the visible browser. Credentials are saved only to the OS keyring and autofilled only on the trusted URFU login form; no password grant is used.
 
 `auth` посещает Modeus и iStudent в одном Chromium-контексте. Завершите SSO/MFA в браузере при необходимости. Учётные данные приложения можно заранее сохранить в системном keyring; тогда заполнение формы ограничено точным официальным HTTPS-адресом. Команда откажет в успехе, если хотя бы одну из сессий не удалось проверить.
 

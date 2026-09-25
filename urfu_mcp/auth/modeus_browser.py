@@ -36,6 +36,7 @@ from urfu_mcp.istudent.session_auth import (
 )
 from urfu_mcp.istudent.session_store import (
     IStudentSessionRecord,
+    IStudentSessionStoreError,
     create_istudent_session_store,
 )
 
@@ -474,7 +475,7 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
 
 
 def run_unified_login(config_path: str = "config.yaml") -> bool:
-    """Verify both same-context sessions, then persist them after explicit consent."""
+    """Verify both same-context sessions, then persist the independently verified records."""
     stage = "opening browser session"
     try:
         session = _open_browser_session(visit_istudent=True)
@@ -491,14 +492,6 @@ def run_unified_login(config_path: str = "config.yaml") -> bool:
         response = _fetch_protected_istudent_page(cookies)
         if not _looks_like_protected_brs(response.text):
             raise ModeusAuthenticationError("iStudent protected BRS page was not verified")
-        print(
-            "Both signed-in app sessions came from the same fresh SSO browser context. "
-            "Their account identifiers are not assumed to match. Do both sessions "
-            "belong to you? Type YES to save them securely: ", end="", flush=True
-        )
-        if input().strip() != "YES":
-            print("Unified sign-in cancelled; no session was saved.")
-            return False
         stage = "saving verified sessions"
         record = IStudentSessionRecord(
             modeus_person_id=cast(str, tokens.person_id),
@@ -512,7 +505,15 @@ def run_unified_login(config_path: str = "config.yaml") -> bool:
                              client_id=session.client_id, token_kind="id_token")
         create_istudent_session_store().save(record)
     except Exception as error:  # noqa: BLE001 - backend details may contain secrets
-        diagnostic = str(error) if isinstance(error, ModeusAuthenticationError) else type(error).__name__
+        diagnostic = (
+            str(error)
+            if isinstance(error, ModeusAuthenticationError)
+            else "iStudent session identity is invalid"
+            if str(error) == "Stored iStudent session identity is invalid"
+            else "Could not store the iStudent session securely"
+            if isinstance(error, IStudentSessionStoreError)
+            else type(error).__name__
+        )
         print(f"Unified sign-in incomplete while {stage} ({diagnostic}); details suppressed.")
         return False
     print("Unified sign-in completed; verified sessions were stored securely.")
