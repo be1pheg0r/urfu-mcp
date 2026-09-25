@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
 import httpx
@@ -474,11 +474,13 @@ def run_modeus_login(config_path: str = "config.yaml") -> bool:
     return True
 
 
-def run_unified_login(config_path: str = "config.yaml") -> bool:
+def run_unified_login(
+    config_path: str = "config.yaml", *, credential_mode: str = "manual"
+) -> bool:
     """Verify both same-context sessions, then persist the independently verified records."""
     stage = "opening browser session"
     try:
-        session = _open_browser_session(visit_istudent=True)
+        session = _open_browser_session(visit_istudent=True, credential_mode=credential_mode)
         stage = "validating iStudent session"
         tokens = validate_oidc_session(session, session.oidc_metadata or {})
         cookies = session.istudent_cookies
@@ -561,7 +563,9 @@ def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> No
     )
 
 
-def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession:
+def _open_browser_session(
+    *, visit_istudent: bool = False, credential_mode: str = "manual"
+) -> BrowserOidcSession:
     """Use a visible Chromium window so the user can complete SSO and MFA."""
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -570,10 +574,15 @@ def _open_browser_session(*, visit_istudent: bool = False) -> BrowserOidcSession
         raise ModeusAuthenticationError("Browser support is not installed") from None
 
     credentials = None
-    try:
-        credentials = create_credential_store().load_any()
-    except CredentialStoreError:
-        credentials = None
+    if credential_mode not in {"manual", "saved"}:
+        raise ModeusAuthenticationError("Unsupported sign-in method")
+    if credential_mode == "saved":
+        try:
+            credentials = create_credential_store().load_any()
+        except CredentialStoreError:
+            raise ModeusAuthenticationError("Could not load credentials from the system keyring") from None
+        if credentials is None:
+            raise ModeusAuthenticationError("No stashed credentials are available")
 
     stage = ["playwright_startup"]
     try:
@@ -604,17 +613,23 @@ def _open_browser_session_at_stage(
                 stage[0] = "modeus_page_goto"
                 page.goto(_MODEUS_URL, wait_until="load", timeout=60_000)
                 if credentials is not None:
-                    _fill_saved_credentials(page, credentials)
-                print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
+                    print("Using saved credentials for URFU SSO; complete MFA if requested.")
+                    stage[0] = "modeus_saved_autofill"
+                    _wait_and_fill_saved_credentials(page, credentials, PlaywrightTimeoutError)
+                else:
+                    print("Complete URFU sign-in in the opened browser; waiting for Modeus.")
                 try:
                     stage[0] = "modeus_oidc_wait"
-                    page.wait_for_function(
-                        "() => { const hasOidc = s => Object.keys(s).some("
-                        "key => key.startsWith('oidc.user:')); "
-                        "return location.hostname === 'urfu.modeus.org' && "
-                        "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
-                        timeout=_AUTH_TIMEOUT * 1000,
-                    )
+                    if credentials is not None:
+                        _wait_for_saved_modeus_session(page, PlaywrightTimeoutError)
+                    else:
+                        page.wait_for_function(
+                            "() => { const hasOidc = s => Object.keys(s).some("
+                            "key => key.startsWith('oidc.user:')); "
+                            "return location.hostname === 'urfu.modeus.org' && "
+                            "(hasOidc(localStorage) || hasOidc(sessionStorage)); }",
+                            timeout=_AUTH_TIMEOUT * 1000,
+                        )
                 except PlaywrightTimeoutError:
                     raise ModeusAuthenticationError(
                         "No Modeus OIDC session appeared after sign-in. "
@@ -646,6 +661,13 @@ def _open_browser_session_at_stage(
                         "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs",
                         wait_until="load", timeout=60_000,
                     )
+                    if credentials is not None and istudent_page.url != (
+                        "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs"
+                    ):
+                        stage[0] = "istudent_saved_autofill"
+                        _wait_and_fill_saved_credentials(
+                            istudent_page, credentials, PlaywrightTimeoutError
+                        )
                     try:
                         stage[0] = "istudent_wait_for_url"
                         istudent_page.wait_for_url(
@@ -717,8 +739,70 @@ def _launch_chromium(playwright: Any) -> Any:
         raise ModeusAuthenticationError("Could not start the sign-in browser") from None
 
 
-def _fill_saved_credentials(page: Any, credentials: CredentialRecord) -> None:
-    """Fill only the official URFU ADFS login form with keyring-stashed values."""
+def _trusted_adfs_form_action(page: Any, form: Any) -> bool:
+    """Allow same-origin ADFS form targets, including normal protocol query strings."""
+    try:
+        current = urlsplit(page.url)
+        action = urlsplit(urljoin(page.url, form.get_attribute("action") or page.url))
+        current_port, action_port = current.port, action.port
+    except (TypeError, ValueError):
+        return False
+    return (
+        current.scheme == "https" and current.hostname == "sso.urfu.ru"
+        and current_port in (None, 443) and current.username is None and current.password is None
+        and current.path == "/adfs/ls/" and not current.fragment
+        and action.scheme == "https" and action.hostname == current.hostname
+        and action_port in (None, 443) and action.username is None and action.password is None
+        and not action.fragment
+    )
+
+
+def _wait_and_fill_saved_credentials(
+    page: Any, credentials: CredentialRecord, timeout_error: type[Exception]
+) -> None:
+    """Wait for an official ADFS login form; saved mode never falls back to typing."""
+    try:
+        page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=15_000)
+        page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+    except timeout_error:
+        raise ModeusAuthenticationError(
+            "Saved sign-in could not find the verified URFU password form; "
+            "use browser sign-in if an additional step is required"
+        ) from None
+    if not _fill_saved_credentials(page, credentials):
+        raise ModeusAuthenticationError("Trusted URFU sign-in form could not be verified")
+
+
+def _wait_for_saved_modeus_session(
+    page: Any, timeout_error: type[Exception],
+) -> None:
+    """Allow MFA, but reject any further password challenge without retrying."""
+    expression = (
+        "() => { const hasOidc = s => Object.keys(s).some("
+        "key => key.startsWith('oidc.user:')); "
+        "if (location.hostname === 'urfu.modeus.org' && "
+        "(hasOidc(localStorage) || hasOidc(sessionStorage))) return 'authenticated'; "
+        "if (location.protocol === 'https:' && location.hostname === 'sso.urfu.ru' "
+        "&& location.pathname === '/adfs/ls/' && "
+        "document.querySelectorAll('form#loginForm input[name=UserName]').length === 1 "
+        "&& document.querySelectorAll('form#loginForm input[name=Password]').length === 1) "
+        "return 'password'; return false; }"
+    )
+    try:
+        outcome = page.wait_for_function(
+            expression, timeout=_AUTH_TIMEOUT * 1000
+        ).json_value()
+    except timeout_error:
+        raise ModeusAuthenticationError("Modeus SSO did not complete") from None
+    if outcome != "authenticated":
+        raise ModeusAuthenticationError(
+            "Saved sign-in encountered an additional password challenge; "
+            "choose browser sign-in for this account"
+        )
+
+
+def _fill_saved_credentials(page: Any, credentials: CredentialRecord) -> bool:
+    """Fill and submit only the exact official HTTPS URFU ADFS login form."""
     parsed = urlsplit(page.url)
     try:
         trusted = (
@@ -728,18 +812,26 @@ def _fill_saved_credentials(page: Any, credentials: CredentialRecord) -> None:
             and parsed.username is None
             and parsed.password is None
             and parsed.path == "/adfs/ls/"
+            and not parsed.fragment
         )
     except ValueError:
         trusted = False
     if not trusted:
-        return
-    username = page.locator("form#loginForm input[name='UserName']")
-    password = page.locator("form#loginForm input[name='Password']")
-    if username.count() != 1 or password.count() != 1:
-        return
+        return False
+    form = page.locator("form#loginForm")
+    username = form.locator("input[name='UserName']")
+    password = form.locator("input[name='Password']")
+    if form.count() != 1 or username.count() != 1 or password.count() != 1:
+        return False
+    if not _trusted_adfs_form_action(page, form):
+        return False
+    submit = form.locator("button[type='submit'], input[type='submit'], #submitButton")
+    if submit.count() != 1:
+        raise ModeusAuthenticationError("Trusted URFU sign-in form has no unique submit control")
     username.fill(credentials.email)
     password.fill(credentials.password)
-    page.locator("#submitButton").click()
+    submit.click()
+    return True
 
 
 def _trusted_https_url(value: Any) -> bool:

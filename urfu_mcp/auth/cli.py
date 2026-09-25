@@ -12,6 +12,10 @@ from urfu_mcp.auth.credential_store import (
     CredentialStoreError,
     create_credential_store,
 )
+from urfu_mcp.auth.method_picker import (
+    choose_authentication_method,
+    prepare_saved_credentials,
+)
 from urfu_mcp.auth.modeus_browser import run_unified_login
 from urfu_mcp.auth.oidc import OidcConfig
 from urfu_mcp.auth.oidc_cli import run_login
@@ -73,29 +77,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if options.command == "login-saved":
-        try:
-            email = input("Email: ").strip()
-            if not email:
-                print("Email must not be empty.", file=sys.stderr)
-                return 1
-            password = getpass.getpass("Password: ")
-            if not password.strip():
-                print("Password must not be empty.", file=sys.stderr)
-                return 1
-            create_credential_store().save(CredentialRecord(email=email, password=password))
-        except CredentialStoreError:
-            print("Could not store credentials in the system keyring.", file=sys.stderr)
+        if not prepare_saved_credentials():
+            print("Saved credentials unavailable or entry cancelled.", file=sys.stderr)
             return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Credential entry cancelled.", file=sys.stderr)
-            return 1
-        print("Credentials stored securely; continuing with official URFU SSO.")
         try:
             load_config()
         except ConfigError:
             print("Could not read config.yaml safely.", file=sys.stderr)
             return 1
-        return 0 if run_unified_login() else 1
+        return 0 if run_unified_login(credential_mode="saved") else 1
 
     if options.command in {"start", "stop"}:
         from urfu_mcp import process_manager
@@ -113,7 +103,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ConfigError:
             print("Could not read config.yaml safely.", file=sys.stderr)
             return 1
-        return 0 if run_unified_login() else 1
+        choice = choose_authentication_method()
+        if choice is None:
+            print("Authentication requires an interactive terminal; no sign-in was started.", file=sys.stderr)
+            return 1
+        if choice == "saved" and not prepare_saved_credentials():
+            print("Saved credentials unavailable or entry cancelled.", file=sys.stderr)
+            return 1
+        return 0 if run_unified_login(credential_mode=choice) else 1
 
     if options.command == "oidc":
         try:
