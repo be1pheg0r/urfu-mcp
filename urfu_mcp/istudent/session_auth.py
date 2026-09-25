@@ -56,18 +56,17 @@ def _valid_session_url(url: httpx.URL) -> bool:
 
 class _RestrictedTransport(httpx.AsyncBaseTransport):
     def __init__(self, transport: httpx.AsyncBaseTransport | None) -> None:
-        self._transport = transport
+        self._transport = transport if transport is not None else httpx.AsyncHTTPTransport(
+            retries=0,
+        )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if not _valid_session_url(request.url):
             raise ValueError("iStudent session requests must use the protected HTTPS origin")
-        if self._transport is None:
-            raise httpx.ConnectError("No iStudent transport configured", request=request)
         return await self._transport.handle_async_request(request)
 
     async def aclose(self) -> None:
-        if self._transport is not None:
-            await self._transport.aclose()
+        await self._transport.aclose()
 
 
 class IStudentTokenError(ValueError):
