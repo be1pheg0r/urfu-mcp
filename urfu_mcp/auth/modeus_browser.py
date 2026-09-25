@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -12,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 from uuid import UUID
 
 import httpx
@@ -666,7 +667,8 @@ def _open_browser_session_at_stage(
                     ):
                         stage[0] = "istudent_saved_autofill"
                         _wait_and_fill_saved_credentials(
-                            istudent_page, credentials, PlaywrightTimeoutError
+                            istudent_page, credentials, PlaywrightTimeoutError,
+                            istudent_flow=True,
                         )
                     try:
                         stage[0] = "istudent_wait_for_url"
@@ -757,20 +759,120 @@ def _trusted_adfs_form_action(page: Any, form: Any) -> bool:
     )
 
 
-def _wait_and_fill_saved_credentials(
-    page: Any, credentials: CredentialRecord, timeout_error: type[Exception]
-) -> None:
-    """Wait for an official ADFS login form; saved mode never falls back to typing."""
+def _trusted_istudent_keycloak_authorization(page: Any) -> bool:
+    """Accept only the fixed HTTPS authorization endpoint for the iStudent client."""
     try:
-        page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=15_000)
-        page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+        parsed = urlsplit(page.url)
+        port = parsed.port
+        clients = parse_qs(parsed.query, keep_blank_values=True).get("client_id", [])
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "keys.urfu.ru"
+        and port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path == "/auth/realms/urfu-lk/protocol/openid-connect/auth"
+        and not parsed.fragment
+        and clients == ["istudent"]
+    )
+
+
+def _is_keys_identity_provider_page(page: Any) -> bool:
+    try:
+        return urlsplit(page.url).hostname == "keys.urfu.ru"
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _trusted_istudent_federation_link(page: Any) -> Any | None:
+    """Identify the unique same-tab iStudent Keycloak SAML broker link."""
+    if not _trusted_istudent_keycloak_authorization(page):
+        return None
+    links = page.locator("a")
+    if links.count() == 0:
+        return None
+    matches: list[Any] = []
+    for index in range(links.count()):
+        link = links.nth(index)
+        try:
+            raw_href = link.get_attribute("href") or ""
+            href = urlsplit(urljoin(page.url, raw_href))
+            port = href.port
+            # The observed Keycloak broker query is plain form syntax. Reject
+            # escaped separators/equality and malformed escapes before decoding,
+            # so parse_qs cannot reinterpret data as additional fields.
+            if re.search(r"%(?![0-9A-Fa-f]{2})|%(?:26|3[Dd]|3[Ff])", href.query):
+                continue
+            query = parse_qs(href.query, keep_blank_values=True, strict_parsing=True)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if (
+            href.scheme == "https"
+            and href.hostname == "keys.urfu.ru"
+            and port in (None, 443)
+            and href.username is None
+            and href.password is None
+            and href.path == "/auth/realms/urfu-lk/broker/saml/login"
+            and not href.fragment
+            and query.get("client_id") == ["istudent"]
+            and all(len(values) == 1 and values[0] for values in query.values())
+            and set(query) == {"client_data", "client_id", "session_code", "tab_id"}
+            and all(href.query.count(f"{key}=") == 1 for key in query)
+            and link.get_attribute("target") in (None, "", "_self")
+        ):
+            matches.append(link)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _wait_and_fill_saved_credentials(
+    page: Any, credentials: CredentialRecord, timeout_error: type[Exception],
+    *, istudent_flow: bool = False,
+) -> None:
+    """Follow verified iStudent federation, then fill the exact official ADFS form once."""
+    try:
+        if istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
+            try:
+                page.wait_for_url(
+                    "https://keys.urfu.ru/auth/realms/urfu-lk/protocol/openid-connect/auth**",
+                    timeout=15_000,
+                )
+            except timeout_error:
+                pass
+        if _trusted_istudent_keycloak_authorization(page):
+            link = _trusted_istudent_federation_link(page)
+            if link is None:
+                raise ModeusAuthenticationError(
+                    "Saved sign-in could not verify the official iStudent federation link"
+                )
+            link.click()
+            page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
+            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+        elif istudent_flow and _is_keys_identity_provider_page(page):
+            raise ModeusAuthenticationError(
+                "Saved sign-in reached an unsupported iStudent identity-provider page"
+            )
+        elif istudent_flow and page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
+            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+        elif istudent_flow:
+            raise ModeusAuthenticationError("Saved sign-in is not on the trusted URFU ADFS form")
+        else:
+            page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=15_000)
+            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+    except ModeusAuthenticationError:
+        raise
     except timeout_error:
         raise ModeusAuthenticationError(
             "Saved sign-in could not find the verified URFU password form; "
             "use browser sign-in if an additional step is required"
         ) from None
     if not _fill_saved_credentials(page, credentials):
-        raise ModeusAuthenticationError("Trusted URFU sign-in form could not be verified")
+        raise ModeusAuthenticationError(
+            "Trusted URFU sign-in form could not be verified"
+        )
+
+
 
 
 def _wait_for_saved_modeus_session(
