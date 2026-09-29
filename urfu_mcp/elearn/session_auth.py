@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import Callable
@@ -17,6 +18,10 @@ ELEAN_HOST = "elearn.urfu.ru"
 ELEAN_ORIGIN = "https://elearn.urfu.ru"
 ELEAN_MY_COURSES_PATH = "/my/courses.php"
 MAX_PAGE_BYTES = 2_000_000
+# The course list is rendered progressively by Moodle, so a valid first response
+# can still be empty. Retry briefly instead of failing a working session.
+_PROTECTED_PAGE_ATTEMPTS = 4
+_PROTECTED_PAGE_RETRY_SECONDS = 1.5
 _COURSE_PATH = re.compile(r"/course/view\.php\Z")
 _COURSE_ID = re.compile(r"\d+\Z")
 
@@ -103,11 +108,21 @@ class StoredELearnSessionProvider:
                 timeout=15,
                 transport=_RestrictedTransport(self._transport),
             )
-            response = await client.get(ELEAN_MY_COURSES_PATH)
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            if (response.status_code != 200 or content_type != "text/html"
-                    or len(response.content) > MAX_PAGE_BYTES
-                    or not looks_like_protected_my_courses(response.text)):
+            # Moodle renders the enrolled-course list progressively, so the
+            # first response can be a valid but still-empty page. Retry a
+            # bounded number of times before treating the session as invalid.
+            verified = False
+            for attempt in range(_PROTECTED_PAGE_ATTEMPTS):
+                response = await client.get(ELEAN_MY_COURSES_PATH)
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if (response.status_code == 200 and content_type == "text/html"
+                        and len(response.content) <= MAX_PAGE_BYTES
+                        and looks_like_protected_my_courses(response.text)):
+                    verified = True
+                    break
+                if attempt < _PROTECTED_PAGE_ATTEMPTS - 1:
+                    await asyncio.sleep(_PROTECTED_PAGE_RETRY_SECONDS)
+            if not verified:
                 await client.aclose()
                 raise ELearnSessionStoreError("eLearn protected page validation failed")
             self._clients.append(client)
