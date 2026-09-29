@@ -1160,6 +1160,10 @@ def _wait_and_fill_saved_credentials(
             page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
         elif istudent_flow:
             raise ModeusAuthenticationError("Saved sign-in is not on the trusted URFU ADFS form")
+        elif elearn_flow:
+            # Already handled above: the ADFS form was reached, or eLearn was
+            # signed in through an existing Keycloak session. Nothing to fill.
+            pass
         else:
             page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=15_000)
             page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
@@ -1170,6 +1174,10 @@ def _wait_and_fill_saved_credentials(
             "Saved sign-in could not find the verified URFU password form; "
             "use browser sign-in if an additional step is required"
         ) from None
+    # Nothing to fill when eLearn was already signed in by an existing Keycloak
+    # session: the protected page is reachable and no password form exists.
+    if elearn_flow and _is_elearn_course_page(page.url):
+        return
     if not _fill_saved_credentials(page, credentials):
         raise ModeusAuthenticationError(
             "Trusted URFU sign-in form could not be verified"
