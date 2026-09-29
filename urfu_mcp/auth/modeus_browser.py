@@ -1062,7 +1062,9 @@ def _unique_keycloak_saml_broker_link(page: Any) -> Any:
     matches: list[Any] = []
     for link in links:
         try:
-            href = urlsplit(link.get_attribute("href") or "")
+            # Keycloak renders the broker link relative to the realm, so resolve
+            # it against the current page before checking the origin.
+            href = urlsplit(urljoin(page.url, link.get_attribute("href") or ""))
         except (AttributeError, TypeError, ValueError):
             continue
         try:
