@@ -16,7 +16,7 @@ from urfu_mcp.auth.method_picker import (
     choose_authentication_method,
     prepare_saved_credentials,
 )
-from urfu_mcp.auth.modeus_browser import run_unified_login
+from urfu_mcp.auth.modeus_browser import run_elearn_login, run_unified_login
 from urfu_mcp.auth.oidc import OidcConfig
 from urfu_mcp.auth.oidc_cli import run_login
 from urfu_mcp.config import (
@@ -39,6 +39,13 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("stop", help="stop only the recorded managed MCP process")
     commands.add_parser("credentials", help="store email and password securely")
     commands.add_parser("login-saved", help="save credentials securely, then sign in through URFU SSO")
+    elearn_command = commands.add_parser(
+        "elearn", help="sign in to elearn.urfu.ru and store a verified session"
+    )
+    elearn_modes = elearn_command.add_subparsers(dest="elearn_mode")
+    elearn_modes.add_parser(
+        "login-saved", help="reuse credentials already stored in the OS keyring"
+    )
     commands.add_parser(
         "oidc", help="sign in using OIDC settings from config.yaml"
     )
@@ -86,6 +93,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Could not read config.yaml safely.", file=sys.stderr)
             return 1
         return 0 if run_unified_login(credential_mode="saved") else 1
+
+    if options.command == "elearn":
+        credential_mode = "saved" if getattr(options, "elearn_mode", None) == "login-saved" else "manual"
+        if credential_mode == "saved" and not prepare_saved_credentials():
+            print("Saved credentials unavailable or entry cancelled.", file=sys.stderr)
+            return 1
+        try:
+            load_config()
+        except ConfigError:
+            print("Could not read config.yaml safely.", file=sys.stderr)
+            return 1
+        return 0 if run_elearn_login(credential_mode=credential_mode) else 1
 
     if options.command in {"start", "stop"}:
         from urfu_mcp import process_manager

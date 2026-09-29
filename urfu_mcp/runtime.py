@@ -1,4 +1,4 @@
-"""Single-user stdio runtime for Modeus tools and fail-closed iStudent BRS."""
+"""Single-user stdio runtime for Modeus tools, iStudent BRS and eLearn courses."""
 
 from __future__ import annotations
 
@@ -14,6 +14,15 @@ from mcp.server import MCPServer
 
 from urfu_mcp.auth.token_store import TokenStore, create_token_store
 from urfu_mcp.config import AppConfig, ConfigError, load_config
+from urfu_mcp.elearn.auth import (
+    ELearnSessionProvider,
+    UnconfiguredELearnSessionProvider,
+)
+from urfu_mcp.elearn.courses_source import ELearnCoursesSource
+from urfu_mcp.elearn.mcp_tools import register_elearn_tools
+from urfu_mcp.elearn.reader import ELearnCourseReader
+from urfu_mcp.elearn.session_auth import StoredELearnSessionProvider
+from urfu_mcp.elearn.session_store import create_elearn_session_store
 from urfu_mcp.istudent.auth import (
     IStudentSessionProvider,
     UnconfiguredIStudentSessionProvider,
@@ -60,13 +69,18 @@ class Runtime:
     server: MCPServer
     client: httpx.AsyncClient
     istudent_session_provider: StoredIStudentSessionProvider | None = None
+    elearn_session_provider: StoredELearnSessionProvider | None = None
 
     async def aclose(self) -> None:
         try:
             if self.istudent_session_provider is not None:
                 await self.istudent_session_provider.aclose()
         finally:
-            await self.client.aclose()
+            try:
+                if self.elearn_session_provider is not None:
+                    await self.elearn_session_provider.aclose()
+            finally:
+                await self.client.aclose()
 
 
 def build_server(
@@ -76,6 +90,8 @@ def build_server(
     client: httpx.AsyncClient | None = None,
     istudent_session_provider: IStudentSessionProvider | None = None,
     brs_reader: BRSPeriodReader | None = None,
+    elearn_session_provider: ELearnSessionProvider | None = None,
+    elearn_reader: ELearnCourseReader | None = None,
 ) -> MCPServer:
     """Build the MCP server from YAML and authenticated identity in the keyring."""
     token_kind = getattr(config.auth, "token_kind", None)
@@ -141,6 +157,18 @@ def build_server(
         session_provider=session_provider,
         reader=period_reader,
     )
+    # eLearn follows the same explicit-opt-in rule: without a stored session
+    # provider the tools stay registered but fail closed on every call.
+    elearn_provider = elearn_session_provider or UnconfiguredELearnSessionProvider()
+    elearn_course_reader = elearn_reader
+    if elearn_course_reader is None and elearn_session_provider is not None:
+        elearn_course_reader = ELearnCourseReader(ELearnCoursesSource())
+    register_elearn_tools(
+        server,
+        identity_provider=_IdentityProvider(str(parsed_person_id)),
+        session_provider=elearn_provider,
+        reader=elearn_course_reader,
+    )
     return server
 
 
@@ -155,14 +183,17 @@ def create_runtime(
     app_config = config or load_config(config_path)
     http_client = client or httpx.AsyncClient(timeout=app_config.modeus_http.timeout_seconds)
     provider = None
+    elearn_provider = None
     try:
         _validate_runtime_auth(app_config, token_store)
         provider = StoredIStudentSessionProvider(create_istudent_session_store())
+        elearn_provider = StoredELearnSessionProvider(create_elearn_session_store())
         server = build_server(
             app_config,
             token_store=token_store,
             client=http_client,
             istudent_session_provider=provider,
+            elearn_session_provider=elearn_provider,
         )
     except Exception:
         async def close_failed_setup() -> None:
@@ -170,10 +201,14 @@ def create_runtime(
                 if provider is not None:
                     await provider.aclose()
             finally:
-                await http_client.aclose()
+                try:
+                    if elearn_provider is not None:
+                        await elearn_provider.aclose()
+                finally:
+                    await http_client.aclose()
         asyncio.run(close_failed_setup())
         raise
-    return Runtime(server, http_client, provider)
+    return Runtime(server, http_client, provider, elearn_provider)
 
 
 def _validate_runtime_auth(config: AppConfig, token_store: TokenStore | None) -> None:

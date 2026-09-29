@@ -29,6 +29,12 @@ from urfu_mcp.auth.credential_store import (
 from urfu_mcp.auth.oidc import _ALLOWED_ID_TOKEN_ALGORITHMS, OidcTokens
 from urfu_mcp.auth.token_store import create_token_store
 from urfu_mcp.config import update_auth_settings
+from urfu_mcp.elearn.session_auth import looks_like_protected_my_courses
+from urfu_mcp.elearn.session_store import (
+    ELearnSessionRecord,
+    ELearnSessionStoreError,
+    create_elearn_session_store,
+)
 from urfu_mcp.istudent.session_auth import (
     _looks_like_protected_brs as _session_brs_check,
 )
@@ -47,6 +53,8 @@ _TRUSTED_MODEUS_TOKEN_ISSUER = "https://urfu-auth.modeus.org/oauth2/token"
 _TRUSTED_METADATA_HOSTS = frozenset({"sso.urfu.ru", "urfu-auth.modeus.org"})
 _MODEUS_URL = "https://urfu.modeus.org/"
 _MODEUS_APP_CONFIG_URL = "https://urfu.modeus.org/assets/app.config.json"
+_ELEARN_URL = "https://elearn.urfu.ru/my/courses.php"
+_ELEARN_HOST = "elearn.urfu.ru"
 _DISCOVERY_LIMIT = 1_000_000
 _AUTH_TIMEOUT = 300
 
@@ -68,6 +76,7 @@ class BrowserOidcSession:
     refresh_token: str | None = field(default=None, repr=False)
     oidc_metadata: dict[str, Any] | None = field(default=None, repr=False)
     istudent_cookies: dict[str, str] | None = field(default=None, repr=False)
+    elearn_cookies: dict[str, str] | None = field(default=None, repr=False)
 
     @property
     def authority(self) -> str:
@@ -523,6 +532,85 @@ def run_unified_login(
     return True
 
 
+def run_elearn_login(
+    config_path: str = "config.yaml", *, credential_mode: str = "manual"
+) -> bool:
+    """Sign in to eLearn separately and store a verified Moodle session.
+
+    eLearn is an independent integration: it must not be able to invalidate an
+    already verified Modeus/iStudent sign-in, so it runs as its own command.
+    """
+    stage = "opening browser session"
+    try:
+        session = _open_browser_session(
+            visit_elearn=True, credential_mode=credential_mode
+        )
+        stage = "validating eLearn session"
+        cookies = session.elearn_cookies
+        if cookies is None:
+            raise ModeusAuthenticationError("eLearn session cookies are missing")
+        response = _fetch_protected_elearn_page(cookies)
+        if not _looks_like_protected_elearn(response.text):
+            raise ModeusAuthenticationError("eLearn protected course page was not verified")
+        stage = "saving verified eLearn session"
+        # Moodle exposes no signed subject like iStudent, so the record binds to
+        # the locally selected Modeus person and is re-verified on every use.
+        person_id = _stored_modeus_person_id()
+        record = ELearnSessionRecord(
+            modeus_person_id=person_id,
+            moodle_session_id=cookies["MoodleSession"],
+            sesskey=cookies.get("MDL_SSP_SessID"),
+            expires_at=time.time() + 900,
+        )
+        create_elearn_session_store().save(record)
+    except Exception as error:  # noqa: BLE001 - backend details may contain secrets
+        diagnostic = (
+            str(error)
+            if isinstance(error, (ModeusAuthenticationError, ELearnSessionStoreError))
+            else type(error).__name__
+        )
+        print(f"eLearn sign-in incomplete while {stage} ({diagnostic}); details suppressed.")
+        return False
+    print("eLearn sign-in completed; the verified session was stored securely.")
+    return True
+
+
+def _stored_modeus_person_id() -> str:
+    """Read the already authenticated Modeus person that eLearn binds to."""
+    try:
+        tokens = create_token_store().load()
+    except Exception:  # noqa: BLE001 - keyring errors may contain secret details
+        raise ModeusAuthenticationError("Could not load the stored Modeus identity") from None
+    person_id = getattr(tokens, "person_id", None)
+    if not isinstance(person_id, str) or not person_id:
+        raise ModeusAuthenticationError("Sign in to Modeus before eLearn")
+    return person_id
+
+
+def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
+    """Fetch only the fixed protected eLearn course page after the browser closed."""
+    cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
+    try:
+        with httpx.Client(follow_redirects=False, timeout=20) as client:
+            response = client.get(_ELEARN_URL, headers={
+                "Cookie": cookie_header,
+                "Accept": "text/html",
+                "User-Agent": "urfu-mcp/0.1",
+            })
+    except httpx.HTTPError:
+        raise ModeusAuthenticationError("eLearn protected page request failed") from None
+    if response.status_code != 200:
+        raise ModeusAuthenticationError("eLearn protected page returned an invalid status")
+    if not response.headers.get("content-type", "").lower().startswith("text/html"):
+        raise ModeusAuthenticationError("eLearn protected page returned an invalid content type")
+    return response
+
+
+def _looks_like_protected_elearn(html: str) -> bool:
+    """Reuse the same structural check as the stored-session provider."""
+    return looks_like_protected_my_courses(html)
+
+
 def _fetch_protected_istudent_page(cookies: Mapping[str, str]) -> httpx.Response:
     """Fetch only the fixed protected BRS page after the browser has closed."""
     url = "https://istudent.urfu.ru/s/http-urfu-ru-ru-students-study-brs"
@@ -565,7 +653,8 @@ def _persist_modeus_session(session: BrowserOidcSession, config_path: str) -> No
 
 
 def _open_browser_session(
-    *, visit_istudent: bool = False, credential_mode: str = "manual"
+    *, visit_istudent: bool = False, visit_elearn: bool = False,
+    credential_mode: str = "manual",
 ) -> BrowserOidcSession:
     """Use a visible Chromium window so the user can complete SSO and MFA."""
     try:
@@ -588,7 +677,8 @@ def _open_browser_session(
     stage = ["playwright_startup"]
     try:
         return _open_browser_session_at_stage(
-            sync_playwright, credentials, visit_istudent, PlaywrightTimeoutError, stage
+            sync_playwright, credentials, visit_istudent, visit_elearn,
+            PlaywrightTimeoutError, stage
         )
     except Exception as error:  # noqa: BLE001 - suppress browser exception details
         raise ModeusAuthenticationError(
@@ -597,7 +687,7 @@ def _open_browser_session(
 
 
 def _open_browser_session_at_stage(
-    sync_playwright: Any, credentials: Any, visit_istudent: bool,
+    sync_playwright: Any, credentials: Any, visit_istudent: bool, visit_elearn: bool,
     PlaywrightTimeoutError: type[Exception], stage: list[str],
 ) -> BrowserOidcSession:
     with sync_playwright() as playwright:
@@ -684,8 +774,37 @@ def _open_browser_session_at_stage(
                     istudent_cookies = _capture_istudent_cookies(context)
                 else:
                     istudent_cookies = None
+                if visit_elearn:
+                    # eLearn shares the same URFU Keycloak but owns a separate
+                    # Moodle session, so it gets its own tab like iStudent.
+                    elearn_page = context.new_page()
+                    stage[0] = "elearn_page_goto"
+                    elearn_page.goto(
+                        _ELEARN_URL,
+                        wait_until="load", timeout=60_000,
+                    )
+                    if credentials is not None and not _is_elearn_course_page(elearn_page.url):
+                        stage[0] = "elearn_saved_autofill"
+                        _wait_and_fill_saved_credentials(
+                            elearn_page, credentials, PlaywrightTimeoutError,
+                            istudent_flow=True,
+                        )
+                    try:
+                        stage[0] = "elearn_wait_for_url"
+                        elearn_page.wait_for_url(_ELEARN_URL, timeout=_AUTH_TIMEOUT * 1000)
+                    except PlaywrightTimeoutError:
+                        raise ModeusAuthenticationError(
+                            "eLearn SSO did not complete; manual login or MFA may be required"
+                        ) from None
+                    stage[0] = "elearn_cookie_capture"
+                    elearn_cookies = _capture_elearn_cookies(context)
+                else:
+                    elearn_cookies = None
                 return replace(
-                    session, oidc_metadata=metadata, istudent_cookies=istudent_cookies
+                    session,
+                    oidc_metadata=metadata,
+                    istudent_cookies=istudent_cookies,
+                    elearn_cookies=elearn_cookies,
                 )
             finally:
                 if sys.exc_info()[0] is None:
@@ -719,6 +838,52 @@ def _capture_istudent_cookies(context: Any) -> dict[str, str]:
         selected[name] = cookie["value"]
     if set(selected) != required:
         raise ModeusAuthenticationError("iStudent session cookies are missing")
+    return selected
+
+
+def _is_elearn_course_page(value: str) -> bool:
+    """Accept only the exact protected eLearn course-list URL."""
+    try:
+        parsed = urlsplit(value)
+        return (
+            parsed.scheme == "https" and parsed.hostname == _ELEARN_HOST
+            and parsed.port in (None, 443) and parsed.username is None
+            and parsed.password is None and parsed.path == "/my/courses.php"
+            and not parsed.fragment
+        )
+    except ValueError:
+        return False
+
+
+def _capture_elearn_cookies(context: Any) -> dict[str, str]:
+    """Capture only the Moodle session cookies for the exact eLearn host.
+
+    The Moodle SAML plugin also sets MDL_SSP_SessID; it is retained when
+    present because the login flow may still need it, but it is not required.
+    """
+    cookies = context.cookies(f"https://{_ELEARN_HOST}/")
+    if not isinstance(cookies, list):
+        raise ModeusAuthenticationError("eLearn session cookies are invalid")
+    required = "MoodleSession"
+    optional = {"MDL_SSP_SessID"}
+    selected: dict[str, str] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = cookie.get("name")
+        if name != required and name not in optional:
+            continue
+        if (
+            cookie.get("domain") not in {_ELEARN_HOST, f".{_ELEARN_HOST}"}
+            or cookie.get("path") != "/"
+            or name in selected
+            or not isinstance(cookie.get("value"), str)
+            or not cookie["value"]
+        ):
+            raise ModeusAuthenticationError("eLearn session cookies are invalid")
+        selected[name] = cookie["value"]
+    if required not in selected:
+        raise ModeusAuthenticationError("eLearn session cookies are missing")
     return selected
 
 
