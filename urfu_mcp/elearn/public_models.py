@@ -21,7 +21,7 @@ class CourseSummary(ELearnModel):
 
 class CourseActivity(ELearnModel):
     name: str = Field(min_length=1, max_length=300)
-    modtype: str | None = Field(default=None, max_length=60)
+    modtype: str = Field(min_length=1, max_length=60)
     url: str | None = Field(default=None, max_length=2000)
     restricted: bool = False
 
@@ -33,10 +33,36 @@ class CourseActivity(ELearnModel):
         return value
 
 
+class CourseAssignment(CourseActivity):
+    due_date: str | None = None
+
+
+class CourseQuiz(CourseActivity):
+    opens_at: str | None = None
+    closes_at: str | None = None
+    time_limit: str | None = None
+
+
+class CourseMaterial(CourseActivity):
+    file_size: str | None = None
+
+
+class CourseForum(CourseActivity):
+    discussion_count: int | None = Field(default=None, ge=0)
+
+
 class CourseSection(ELearnModel):
     name: str = Field(max_length=300)
-    section_id: str | None = None
-    activities: tuple[CourseActivity, ...]
+    section_id: str
+    assignments: tuple[CourseAssignment, ...] = ()
+    quizzes: tuple[CourseQuiz, ...] = ()
+    materials: tuple[CourseMaterial, ...] = ()
+    forums: tuple[CourseForum, ...] = ()
+    other: tuple[CourseActivity, ...] = ()
+
+    @property
+    def activities(self) -> tuple[CourseActivity, ...]:
+        return (*self.assignments, *self.quizzes, *self.materials, *self.forums, *self.other)
 
 
 class CourseContent(ELearnModel):
@@ -70,4 +96,4 @@ def public_course_content_payload(content: CourseContent, *, selector: str, as_o
     }
 
 
-__all__ = ["CourseActivity", "CourseContent", "CourseSection", "CourseSummary", "public_course_content_payload", "public_courses_payload"]
+__all__ = ["CourseActivity", "CourseAssignment", "CourseContent", "CourseForum", "CourseMaterial", "CourseQuiz", "CourseSection", "CourseSummary", "public_course_content_payload", "public_courses_payload"]

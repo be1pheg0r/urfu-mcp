@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import json
 import re
+from typing import cast
 from urllib.parse import urlsplit
 
 from urfu_mcp.html_tree import _HTMLTree, _Node
 
 from .errors import InvalidUpstreamResponse
-from .public_models import CourseActivity, CourseContent, CourseSection, CourseSummary
+from .public_models import (
+    CourseActivity,
+    CourseAssignment,
+    CourseContent,
+    CourseForum,
+    CourseMaterial,
+    CourseQuiz,
+    CourseSection,
+    CourseSummary,
+)
 
 MAX_HTML_BYTES = 2_000_000
 COURSE_HREF = re.compile(
@@ -154,45 +164,101 @@ class CoursePageParser:
         if not titles:
             titles = [n.all_text().strip() for n in tree.root.descendants() if n.tag == "title" and n.all_text().strip()]
         name = titles[0] if titles else None
-        sections_nodes = [n for n in nodes if "section" in n.classes() or _SECTION_ID.fullmatch(n.attrs.get("id", ""))]
+        section_nodes = [
+            node
+            for node in nodes
+            if "section" in node.classes()
+            and node.attrs.get("data-for") == "section"
+            and node.attrs.get("data-sectionid", "").isdigit()
+        ]
+        if not section_nodes:
+            section_nodes = [
+                node for node in nodes
+                if "section" in node.classes() and _SECTION_ID.fullmatch(node.attrs.get("id", ""))
+            ]
+        if not section_nodes:
+            raise InvalidUpstreamResponse("eLearn course has no recognized sections")
         sections: list[CourseSection] = []
         activity_count = 0
-        for section in sections_nodes:
+        seen_sections: set[str] = set()
+        for section in section_nodes:
+            raw_id = section.attrs.get("data-sectionid") or section.attrs.get("id", "").removeprefix("section-")
+            if not raw_id.isdigit() or raw_id in seen_sections:
+                continue
+            seen_sections.add(raw_id)
             inside = section.descendants()
-            headings = [n for n in inside if n.tag in {"h2", "h3", "h4", "h5"}]
-            named = [n for n in headings if "sectionname" in n.classes()]
-            heading = named[0] if named else (headings[0] if headings else None)
-            section_name = heading.all_text().strip() if heading else ""
-            section_id = section.attrs.get("id")
-            if section_id == "section-0" and not section_name:
+            headings = [n for n in inside if "sectionname" in n.classes()]
+            section_name = headings[0].all_text().strip() if headings else ""
+            if raw_id == "0" and not section_name:
                 section_name = "Общая информация"
-            activities = [n for n in inside if "activity" in n.classes()]
-            output: list[CourseActivity] = []
+            categories: dict[str, list[CourseActivity]] = {
+                "assignments": [], "quizzes": [], "materials": [], "forums": [], "other": [],
+            }
+            activities = [n for n in inside if "activity" in n.classes() and n.attrs.get("data-for") == "cmitem"]
+            if not activities:
+                activities = [n for n in inside if "activity" in n.classes() and not n.attrs.get("data-for")]
             for activity in activities:
                 descendants = [activity, *activity.descendants()]
-                name_nodes = [n for n in descendants if "activityname" in n.classes()]
-                if not name_nodes:
-                    name_nodes = [n for n in descendants if "instancename" in n.classes()]
                 anchors = [n for n in descendants if n.tag == "a"]
-                activity_name = (name_nodes[0].all_text() if name_nodes else anchors[0].all_text() if anchors else "").strip()
+                if not anchors:
+                    continue
+                activity_name_nodes = [n for n in descendants if "activityname" in n.classes()]
+                if not activity_name_nodes:
+                    activity_name_nodes = [n for n in descendants if "instancename" in n.classes()]
+                activity_name = (activity_name_nodes[0].all_text() if activity_name_nodes else anchors[0].all_text()).strip()
                 if not activity_name:
                     raise InvalidUpstreamResponse("eLearn activity name is missing")
-                href = anchors[0].attrs.get("href") if anchors else None
+                href = next((n.attrs.get("href", "") for n in anchors if n.attrs.get("href")), "")
+                match = re.search(r"/mod/([a-z0-9_]+)/", href)
+                modtype = match.group(1) if match else next(
+                    (m.group(1) for n in descendants for c in n.classes() if (m := _MODTYPE.fullmatch(c))),
+                    "unknown",
+                )
                 url = None
-                if href:
-                    try:
-                        scheme = urlsplit(href).scheme.lower()
-                    except ValueError:
-                        scheme = ""
-                    if scheme in {"http", "https"}:
+                try:
+                    parsed = urlsplit(href)
+                    if parsed.scheme.lower() in {"http", "https"}:
                         url = href
-                modtype = next((m.group(1) for n in descendants for c in n.classes() if (m := _MODTYPE.fullmatch(c))), None)
-                restricted = any(n.classes() & {"restricted", "locked"} for n in descendants) or any("availability" in n.classes() and _restriction_text(n.all_text()) for n in descendants)
-                output.append(CourseActivity(name=activity_name, modtype=modtype, url=url, restricted=restricted))
+                except ValueError:
+                    pass
+                restricted = any(n.classes() & {"restricted", "locked"} for n in descendants) or any(
+                    "availability" in n.classes() and _restriction_text(n.all_text()) for n in descendants
+                )
+                metadata: dict[str, str] = {}
+                for node in descendants:
+                    for key, value in node.attrs.items():
+                        if key in {"data-duedate", "data-timeopen", "data-timeclose", "data-timelimit", "data-filesize"} and value.strip():
+                            metadata[key.removeprefix("data-")] = value.strip()[:120]
+                if modtype == "assign":
+                    item: CourseActivity = CourseAssignment(name=activity_name, modtype=modtype, url=url, restricted=restricted, due_date=metadata.get("duedate"))
+                    category = "assignments"
+                elif modtype == "quiz":
+                    item = CourseQuiz(name=activity_name, modtype=modtype, url=url, restricted=restricted, opens_at=metadata.get("timeopen"), closes_at=metadata.get("timeclose"), time_limit=metadata.get("timelimit"))
+                    category = "quizzes"
+                elif modtype == "forum":
+                    item = CourseForum(name=activity_name, modtype=modtype, url=url, restricted=restricted)
+                    category = "forums"
+                elif modtype in {"resource", "page", "url", "folder", "book", "file"}:
+                    item = CourseMaterial(name=activity_name, modtype=modtype, url=url, restricted=restricted, file_size=metadata.get("filesize"))
+                    category = "materials"
+                else:
+                    item = CourseActivity(name=activity_name, modtype=modtype, url=url, restricted=restricted)
+                    category = "other"
+                categories[category].append(item)
                 activity_count += 1
                 if activity_count > 200:
                     raise InvalidUpstreamResponse("eLearn course exceeds the activity limit")
-            sections.append(CourseSection(name=section_name, section_id=section_id, activities=tuple(output)))
+            sections.append(
+                CourseSection(
+                    name=section_name,
+                    section_id=raw_id,
+                    assignments=tuple(cast(list[CourseAssignment], categories["assignments"])),
+                    quizzes=tuple(cast(list[CourseQuiz], categories["quizzes"])),
+                    materials=tuple(cast(list[CourseMaterial], categories["materials"])),
+                    forums=tuple(cast(list[CourseForum], categories["forums"])),
+                    other=tuple(categories["other"]),
+                )
+            )
             if len(sections) > 100:
                 raise InvalidUpstreamResponse("eLearn course exceeds the section limit")
         return CourseContent(course_id=course_id, name=name, sections=tuple(sections))
