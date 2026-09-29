@@ -30,7 +30,7 @@ def _valid_session_url(url: httpx.URL) -> bool:
     """Allow protected Moodle paths only on the exact HTTPS origin."""
     return (
         url.scheme == "https" and url.host == ELEAN_HOST and url.port in (None, 443)
-        and (url.path == ELEAN_MY_COURSES_PATH or url.path.startswith("/course/view.php"))
+        and (url.path == ELEAN_MY_COURSES_PATH or url.path == "/lib/ajax/service.php" or url.path.startswith("/course/view.php"))
         and not url.username and not url.password and not url.fragment
     )
 

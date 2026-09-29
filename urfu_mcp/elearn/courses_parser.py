@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -54,8 +55,23 @@ def _body(tree: _HTMLTree) -> _Node | None:
     return body
 
 
+def _ancestors(root: _Node, target: _Node) -> list[_Node]:
+    def walk(node: _Node, stack: list[_Node]) -> list[_Node] | None:
+        if node is target:
+            return stack
+        for child in node.children:
+            result = walk(child, [*stack, node])
+            if result is not None:
+                return result
+        return None
+
+    return walk(root, []) or []
+
+
 class MyCoursesParser:
     def parse(self, html: str | bytes) -> tuple[CourseSummary, ...]:
+        if isinstance(html, str) and html.lstrip().startswith("["):
+            return self._parse_ajax(html)
         tree = _tree(html)
         body = _body(tree)
         nodes = body.descendants() if body else tree.root.descendants()
@@ -86,17 +102,41 @@ class MyCoursesParser:
                 raise InvalidUpstreamResponse("eLearn course list exceeds the supported size")
         return tuple(found.values())
 
-
-def _ancestors(root: _Node, target: _Node) -> list[_Node]:
-    def walk(node: _Node, stack: list[_Node]) -> list[_Node] | None:
-        if node is target:
-            return stack
-        for child in node.children:
-            result = walk(child, [*stack, node])
-            if result is not None:
-                return result
-        return None
-    return walk(root, []) or []
+    def _parse_ajax(self, payload: str) -> tuple[CourseSummary, ...]:
+        try:
+            response = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            raise InvalidUpstreamResponse("eLearn course list response is malformed") from None
+        if not isinstance(response, list) or len(response) != 1 or not isinstance(response[0], dict):
+            raise InvalidUpstreamResponse("eLearn course list response is unrecognized")
+        data = response[0].get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("courses"), list):
+            raise InvalidUpstreamResponse("eLearn course list response is unrecognized")
+        records = data["courses"]
+        if not records or len(records) > 64:
+            raise InvalidUpstreamResponse("eLearn course list has no recognized courses or exceeds the supported size")
+        courses: list[CourseSummary] = []
+        seen: set[int] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise InvalidUpstreamResponse("eLearn course record is unrecognized")
+            course_id = record.get("id")
+            name = record.get("fullname") or record.get("fullnamedisplay")
+            short_name = record.get("shortname")
+            if isinstance(course_id, bool) or not isinstance(course_id, int) or course_id <= 0:
+                raise InvalidUpstreamResponse("eLearn course identifier is unrecognized")
+            if not isinstance(name, str) or not name.strip():
+                raise InvalidUpstreamResponse("eLearn course name is missing")
+            if short_name is not None and not isinstance(short_name, str):
+                raise InvalidUpstreamResponse("eLearn course short name is unrecognized")
+            if course_id in seen:
+                raise InvalidUpstreamResponse("eLearn course identifiers are inconsistent")
+            seen.add(course_id)
+            try:
+                courses.append(CourseSummary(course_id=course_id, name=name.strip(), short_name=short_name or None))
+            except ValueError:
+                raise InvalidUpstreamResponse("eLearn course record is unrecognized") from None
+        return tuple(courses)
 
 
 def _restriction_text(value: str) -> bool:
@@ -109,9 +149,10 @@ class CoursePageParser:
         tree = _tree(html)
         body = _body(tree)
         nodes = body.descendants() if body else tree.root.descendants()
-        titles = [n.all_text().strip() for n in nodes if n.tag == "h1" and n.all_text().strip()]
+        name_nodes = body.descendants() if body else tree.root.descendants()
+        titles = [n.all_text().strip() for n in name_nodes if n.tag == "h1" and n.all_text().strip()]
         if not titles:
-            titles = [n.all_text().strip() for n in nodes if n.tag == "title" and n.all_text().strip()]
+            titles = [n.all_text().strip() for n in tree.root.descendants() if n.tag == "title" and n.all_text().strip()]
         name = titles[0] if titles else None
         sections_nodes = [n for n in nodes if "section" in n.classes() or _SECTION_ID.fullmatch(n.attrs.get("id", ""))]
         sections: list[CourseSection] = []
@@ -126,8 +167,6 @@ class CoursePageParser:
             if section_id == "section-0" and not section_name:
                 section_name = "Общая информация"
             activities = [n for n in inside if "activity" in n.classes()]
-            if not activities:
-                activities = [n for n in inside if n.tag == "li" and n in [c for p in inside if p.tag == "ul" for c in p.children]]
             output: list[CourseActivity] = []
             for activity in activities:
                 descendants = [activity, *activity.descendants()]
