@@ -29,7 +29,7 @@ from urfu_mcp.auth.credential_store import (
 from urfu_mcp.auth.oidc import _ALLOWED_ID_TOKEN_ALGORITHMS, OidcTokens
 from urfu_mcp.auth.token_store import create_token_store
 from urfu_mcp.config import update_auth_settings
-from urfu_mcp.elearn.session_auth import looks_like_protected_my_courses
+from urfu_mcp.elearn.session_auth import looks_like_authenticated_page
 from urfu_mcp.elearn.session_store import (
     ELearnSessionRecord,
     ELearnSessionStoreError,
@@ -613,7 +613,7 @@ def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
                 last_content_type = response.headers.get("content-type", "").lower()
                 last_html = response.text
                 if (last_status == 200 and last_content_type.startswith("text/html")
-                        and _looks_like_protected_elearn(response.text)):
+                        and looks_like_authenticated_page(response.text)):
                     return response
                 if attempt < _ELEARN_PAGE_ATTEMPTS - 1:
                     time.sleep(_ELEARN_PAGE_RETRY_SECONDS)
@@ -631,7 +631,7 @@ def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
 
 def _looks_like_protected_elearn(html: str) -> bool:
     """Reuse the same structural check as the stored-session provider."""
-    return looks_like_protected_my_courses(html)
+    return looks_like_authenticated_page(html)
 
 
 def _describe_elearn_page_shape(html: str) -> str:

@@ -50,6 +50,20 @@ class _RestrictedTransport(httpx.AsyncBaseTransport):
 
 def looks_like_protected_my_courses(html: str) -> bool:
     """Require a Moodle course link and reject the explicit anonymous marker."""
+    return _authenticated_page(html) and _has_course_link(html)
+
+
+def looks_like_authenticated_page(html: str) -> bool:
+    """Report whether the HTML is a signed-in page rather than the login screen.
+
+    Moodle renders the enrolled-course list with JavaScript, so an HTTP response
+    can be fully authenticated and still contain no course link. Use this to
+    decide whether a session is signed in.
+    """
+    return _authenticated_page(html)
+
+
+def _authenticated_page(html: str) -> bool:
     tree = _HTMLTree()
     try:
         tree.feed(html)
@@ -60,6 +74,27 @@ def looks_like_protected_my_courses(html: str) -> bool:
         return False
     if any(node.tag == "body" and "notloggedin" in node.classes() for node in nodes):
         return False
+    # A login page may render without the anonymous marker, so also reject a
+    # page that still offers a sign-in form or a link to the login endpoint.
+    for node in nodes:
+        if node.tag == "a":
+            href = node.attrs.get("href", "")
+            if "/login/index.php" in href or href.rstrip("/").endswith("/login"):
+                return False
+        if node.tag == "form" and any(
+            child.tag == "input" and child.attrs.get("type") == "password" for child in node.descendants()
+        ):
+            return False
+    return True
+
+
+def _has_course_link(html: str) -> bool:
+    tree = _HTMLTree()
+    try:
+        tree.feed(html)
+    except ValueError:
+        return False
+    nodes = tree.root.descendants()
     for node in nodes:
         if node.tag != "a":
             continue
@@ -117,7 +152,7 @@ class StoredELearnSessionProvider:
                 content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                 if (response.status_code == 200 and content_type == "text/html"
                         and len(response.content) <= MAX_PAGE_BYTES
-                        and looks_like_protected_my_courses(response.text)):
+                        and looks_like_authenticated_page(response.text)):
                     verified = True
                     break
                 if attempt < _PROTECTED_PAGE_ATTEMPTS - 1:
