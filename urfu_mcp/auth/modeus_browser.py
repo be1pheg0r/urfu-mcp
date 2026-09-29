@@ -1034,6 +1034,15 @@ def _trusted_istudent_federation_link(page: Any) -> Any | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _page_location(page: Any) -> str:
+    """Return scheme, host and path only; never the query, which may hold tokens."""
+    try:
+        parts = urlsplit(page.url)
+    except (AttributeError, TypeError, ValueError):
+        return "unknown"
+    return f"{parts.scheme}://{parts.hostname}{parts.path}"
+
+
 def _unique_keycloak_saml_broker_link(page: Any) -> Any:
     """Return the single verified Keycloak federation link for the eLearn SAML flow.
 
@@ -1098,12 +1107,18 @@ def _wait_and_fill_saved_credentials(
                 pass
             link = _unique_keycloak_saml_broker_link(page)
             if link is None:
+                # Host and path only: the query carries a SAMLRequest value.
+                print(f"eLearn saml page: {_page_location(page)} broker_link=missing")
                 raise ModeusAuthenticationError(
                     "Saved sign-in reached an unsupported eLearn identity-provider page"
                 )
             link.click()
-            page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
-            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+            try:
+                page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
+                page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+            except timeout_error:
+                print(f"eLearn after broker click: {_page_location(page)} adfs_form=missing")
+                raise
         elif istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
             try:
                 page.wait_for_url(
