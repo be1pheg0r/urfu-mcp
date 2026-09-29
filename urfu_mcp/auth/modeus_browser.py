@@ -600,6 +600,7 @@ def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
     cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
     last_status = 0
     last_content_type = ""
+    last_html = ""
     try:
         with httpx.Client(follow_redirects=False, timeout=20) as client:
             for attempt in range(_ELEARN_PAGE_ATTEMPTS):
@@ -610,6 +611,7 @@ def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
                 })
                 last_status = response.status_code
                 last_content_type = response.headers.get("content-type", "").lower()
+                last_html = response.text
                 if (last_status == 200 and last_content_type.startswith("text/html")
                         and _looks_like_protected_elearn(response.text)):
                     return response
@@ -622,12 +624,34 @@ def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
     if not last_content_type.startswith("text/html"):
         raise ModeusAuthenticationError("eLearn protected page returned an invalid content type")
     # 200 and text/html, but the course list never rendered into the page.
+    # Page shape only: never course names, ids, cookies or personal data.
+    print(f"eLearn page shape: {_describe_elearn_page_shape(last_html)}")
     raise ModeusAuthenticationError("eLearn protected course page was not verified")
 
 
 def _looks_like_protected_elearn(html: str) -> bool:
     """Reuse the same structural check as the stored-session provider."""
     return looks_like_protected_my_courses(html)
+
+
+def _describe_elearn_page_shape(html: str) -> str:
+    """Describe page SHAPE only for diagnostics: no names, ids or cookies."""
+    from urfu_mcp.html_tree import _HTMLTree
+
+    tree = _HTMLTree()
+    try:
+        tree.feed(html)
+    except ValueError:
+        return "unparseable"
+    nodes = tree.root.descendants()
+    bodies = [node for node in nodes if node.tag == "body"]
+    anonymous = any("notloggedin" in node.classes() for node in bodies)
+    course_links = 0
+    for node in nodes:
+        if node.tag == "a" and "course/view.php" in node.attrs.get("href", ""):
+            course_links += 1
+    has_login_form = any(node.tag == "form" for node in nodes)
+    return f"anonymous={anonymous} course_links={course_links} has_form={has_login_form}"
 
 
 def _fetch_protected_istudent_page(cookies: Mapping[str, str]) -> httpx.Response:
@@ -806,7 +830,7 @@ def _open_browser_session_at_stage(
                         stage[0] = "elearn_saved_autofill"
                         _wait_and_fill_saved_credentials(
                             elearn_page, credentials, PlaywrightTimeoutError,
-                            istudent_flow=True,
+                            elearn_flow=True,
                         )
                     try:
                         stage[0] = "elearn_wait_for_url"
@@ -1010,13 +1034,77 @@ def _trusted_istudent_federation_link(page: Any) -> Any | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _unique_keycloak_saml_broker_link(page: Any) -> Any:
+    """Return the single verified Keycloak federation link for the eLearn SAML flow.
+
+    eLearn authenticates through Keycloak's SAML endpoint, whose broker link
+    carries an eLearn client id that is not asserted here. The link is still
+    constrained to the exact realm broker path on the exact HTTPS host, so it
+    can only lead to URFU's own federation broker, and only the resulting
+    official ADFS form is ever filled.
+    """
+    if not _is_keys_identity_provider_page(page):
+        return None
+    try:
+        links = page.query_selector_all("a[href]")
+    except Exception:  # noqa: BLE001 - browser errors can expose local system details
+        return None
+    allowed = {"client_data", "client_id", "session_code", "tab_id"}
+    matches: list[Any] = []
+    for link in links:
+        try:
+            href = urlsplit(link.get_attribute("href") or "")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        try:
+            query = parse_qs(href.query, keep_blank_values=True, strict_parsing=True)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if (
+            href.scheme == "https"
+            and href.hostname == "keys.urfu.ru"
+            and href.port in (None, 443)
+            and href.username is None
+            and href.password is None
+            and href.path == "/auth/realms/urfu-lk/broker/saml/login"
+            and not href.fragment
+            and set(query) <= allowed
+            and all(len(values) == 1 and values[0] for values in query.values())
+            and all(href.query.count(f"{key}=") == 1 for key in query)
+            and link.get_attribute("target") in (None, "", "_self")
+        ):
+            matches.append(link)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _wait_and_fill_saved_credentials(
     page: Any, credentials: CredentialRecord, timeout_error: type[Exception],
-    *, istudent_flow: bool = False,
+    *, istudent_flow: bool = False, elearn_flow: bool = False,
 ) -> None:
-    """Follow verified iStudent federation, then fill the exact official ADFS form once."""
+    """Follow verified federation, then fill the exact official ADFS form once.
+
+    iStudent reaches ADFS through the Keycloak OpenID Connect endpoint; eLearn
+    reaches the same ADFS form through the Keycloak SAML endpoint, so each
+    flow follows its own verified link instead of guessing.
+    """
     try:
-        if istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
+        if elearn_flow and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
+            try:
+                page.wait_for_url(
+                    "https://keys.urfu.ru/auth/realms/urfu-lk/protocol/saml**",
+                    timeout=15_000,
+                )
+            except timeout_error:
+                pass
+            link = _unique_keycloak_saml_broker_link(page)
+            if link is None:
+                raise ModeusAuthenticationError(
+                    "Saved sign-in reached an unsupported eLearn identity-provider page"
+                )
+            link.click()
+            page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
+            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+        elif istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
             try:
                 page.wait_for_url(
                     "https://keys.urfu.ru/auth/realms/urfu-lk/protocol/openid-connect/auth**",
