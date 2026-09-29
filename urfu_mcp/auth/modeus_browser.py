@@ -55,6 +55,10 @@ _MODEUS_URL = "https://urfu.modeus.org/"
 _MODEUS_APP_CONFIG_URL = "https://urfu.modeus.org/assets/app.config.json"
 _ELEARN_URL = "https://elearn.urfu.ru/my/courses.php"
 _ELEARN_HOST = "elearn.urfu.ru"
+# Moodle renders the course list progressively, so a valid first response can
+# still lack any course link; retry briefly before treating it as a failure.
+_ELEARN_PAGE_ATTEMPTS = 5
+_ELEARN_PAGE_RETRY_SECONDS = 2.0
 _DISCOVERY_LIMIT = 1_000_000
 _AUTH_TIMEOUT = 300
 
@@ -588,22 +592,37 @@ def _stored_modeus_person_id() -> str:
 
 
 def _fetch_protected_elearn_page(cookies: Mapping[str, str]) -> httpx.Response:
-    """Fetch only the fixed protected eLearn course page after the browser closed."""
+    """Fetch only the fixed protected eLearn course page after the browser closed.
+
+    Moodle renders the course list progressively, so a valid first response can
+    still lack any course link. Retry a bounded number of times before failing.
+    """
     cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
+    last_status = 0
+    last_content_type = ""
     try:
         with httpx.Client(follow_redirects=False, timeout=20) as client:
-            response = client.get(_ELEARN_URL, headers={
-                "Cookie": cookie_header,
-                "Accept": "text/html",
-                "User-Agent": "urfu-mcp/0.1",
-            })
+            for attempt in range(_ELEARN_PAGE_ATTEMPTS):
+                response = client.get(_ELEARN_URL, headers={
+                    "Cookie": cookie_header,
+                    "Accept": "text/html",
+                    "User-Agent": "urfu-mcp/0.1",
+                })
+                last_status = response.status_code
+                last_content_type = response.headers.get("content-type", "").lower()
+                if (last_status == 200 and last_content_type.startswith("text/html")
+                        and _looks_like_protected_elearn(response.text)):
+                    return response
+                if attempt < _ELEARN_PAGE_ATTEMPTS - 1:
+                    time.sleep(_ELEARN_PAGE_RETRY_SECONDS)
     except httpx.HTTPError:
         raise ModeusAuthenticationError("eLearn protected page request failed") from None
-    if response.status_code != 200:
+    if last_status != 200:
         raise ModeusAuthenticationError("eLearn protected page returned an invalid status")
-    if not response.headers.get("content-type", "").lower().startswith("text/html"):
+    if not last_content_type.startswith("text/html"):
         raise ModeusAuthenticationError("eLearn protected page returned an invalid content type")
-    return response
+    # 200 and text/html, but the course list never rendered into the page.
+    raise ModeusAuthenticationError("eLearn protected course page was not verified")
 
 
 def _looks_like_protected_elearn(html: str) -> bool:
