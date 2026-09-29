@@ -223,6 +223,7 @@ __marimo__/
 
 # All AI stuff has to be ignored
 .codex/
+docs/design/
 .claude/
 .cao/
 
