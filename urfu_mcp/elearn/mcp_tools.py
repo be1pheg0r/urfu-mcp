@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -20,7 +21,7 @@ from .public_models import (
     public_course_files_payload,
     public_courses_payload,
 )
-from .reader import ELearnCourseReaderPort, local_today
+from .reader import ELearnCourseReaderPort, default_download_directory, local_today
 
 
 def register_elearn_tools(
@@ -29,6 +30,7 @@ def register_elearn_tools(
     identity_provider: ELearnIdentityProvider,
     session_provider: ELearnSessionProvider,
     reader: ELearnCourseReaderPort | None,
+    download_directory: str | Path | None = None,
 ) -> None:
     async def context() -> tuple[str, object]:
         try:
@@ -87,6 +89,28 @@ def register_elearn_tools(
         except Exception:  # noqa: BLE001 - sanitize private provider/reader failures
             raise ToolError("The eLearn request could not be completed safely") from None
 
+    async def retrieve_course_file(course: str, file_name: str) -> dict[str, object]:
+        try:
+            if not isinstance(course, str) or not course.strip():
+                raise ToolError("course must not be blank")
+            if not isinstance(file_name, str) or not file_name:
+                raise ToolError("file_name must not be blank")
+            _, session = await context()
+            file_info, saved_path = await cast(ELearnCourseReaderPort, reader).download_file(
+                cast(httpx.AsyncClient, session), course, file_name,
+                download_directory if download_directory is not None else default_download_directory(),
+            )
+            return {
+                **file_info.model_dump(mode="json", exclude_none=True),
+                "saved_path": str(saved_path),
+            }
+        except ELearnError as error:
+            raise ToolError(str(error)) from None
+        except ToolError:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize private provider/reader failures
+            raise ToolError("The eLearn request could not be completed safely") from None
+
     server.add_tool(
         retrieve_courses_list,
         name="retrieve_courses_list",
@@ -106,6 +130,14 @@ def register_elearn_tools(
         name="retrieve_course_files",
         description=("List downloadable files for one enrolled course with metadata and direct links; file contents are never returned. "
                      "The course argument accepts a course_id or exact course name."),
+        structured_output=True,
+    )
+    server.add_tool(
+        retrieve_course_file,
+        name="retrieve_course_file",
+        description=("Download one file already listed for an enrolled course and save it in the private per-user files directory "
+                     "(default: ~/.urfu-mcp/files). Provide the course_id or exact course name and exact file_name from "
+                     "retrieve_course_files. Returns file metadata and the absolute saved_path."),
         structured_output=True,
     )
 

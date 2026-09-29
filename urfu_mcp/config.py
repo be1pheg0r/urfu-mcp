@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_days": 14,
         "max_subjects": 3,
     },
+    "elearn": {"files_directory": None},
 }
 
 
@@ -117,11 +118,23 @@ class ScheduleSettings(_Section):
         return value
 
 
+class ELearnSettings(_Section):
+    files_directory: str | None = None
+
+    @field_validator("files_directory", mode="before")
+    @classmethod
+    def empty_files_directory_is_unset(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
 class AppConfig(_Section):
     server: ServerSettings = Field(default_factory=ServerSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     modeus_http: ModeusHttpSettings = Field(default_factory=ModeusHttpSettings)
     schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
+    elearn: ELearnSettings = Field(default_factory=ELearnSettings)
 
     @property
     def server_name(self) -> str:

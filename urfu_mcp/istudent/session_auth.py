@@ -19,6 +19,7 @@ JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
 MAX_JWKS_BYTES = 1_000_000
 ISTUDENT_HOST = "istudent.urfu.ru"
 ISTUDENT_PATH = "/s/http-urfu-ru-ru-students-study-brs"
+ISTUDENT_BRS_PATHS = frozenset({ISTUDENT_PATH, f"{ISTUDENT_PATH}/discipline"})
 
 
 def _looks_like_protected_brs(html: str) -> bool:
@@ -48,9 +49,8 @@ def _valid_session_url(url: httpx.URL) -> bool:
         url.scheme == "https"
         and url.host == ISTUDENT_HOST
         and url.port in (None, 443)
-        and url.path == ISTUDENT_PATH
-        and not url.username
-        and not url.password
+        and url.path in ISTUDENT_BRS_PATHS
+        and not url.userinfo
     )
 
 

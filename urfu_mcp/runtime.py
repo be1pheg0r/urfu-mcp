@@ -168,6 +168,7 @@ def build_server(
         identity_provider=_IdentityProvider(str(parsed_person_id)),
         session_provider=elearn_provider,
         reader=elearn_course_reader,
+        download_directory=config.elearn.files_directory,
     )
     return server
 

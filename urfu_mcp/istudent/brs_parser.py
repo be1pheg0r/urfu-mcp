@@ -211,6 +211,15 @@ class IStudentBRSHTMLParser:
                     if n.tag == "a" and "discipline-header" in n.classes()
                 ]
             )
+            shutter = _single(
+                [
+                    n
+                    for n in discipline.children
+                    if n.tag == "div" and "discipline-shutter" in n.classes()
+                ]
+            )
+            if not shutter.closed:
+                raise InvalidUpstreamResponse("BRS HTML detail trigger is truncated")
             cells = [
                 _single([n for n in anchor.children if f"td-{index}" in n.classes()])
                 for index in range(3)

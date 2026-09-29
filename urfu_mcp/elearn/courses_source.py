@@ -18,6 +18,7 @@ COURSE_PATH = "/course/view.php"
 AJAX_PATH = "/lib/ajax/service.php"
 AJAX_METHOD = "core_course_get_enrolled_courses_by_timeline_classification"
 MAX_COURSES = 64
+MAX_FILE_BYTES = 50_000_000
 _MESSAGE = "eLearn page is unavailable or unrecognized"
 _SESSKEY = re.compile(r'"sesskey"\s*:\s*"([^"\\]{1,128})"')
 
@@ -152,6 +153,29 @@ class ELearnCoursesSource:
     async def fetch_folder(self, client: httpx.AsyncClient, url: str) -> str:
         safe_url = self._safe_url(url, path="/mod/folder/view.php")
         return await self._get(client, safe_url)
+
+    async def fetch_file(self, client: httpx.AsyncClient, url: str, max_bytes: int = MAX_FILE_BYTES) -> bytes:
+        safe_url = self._safe_file_url(url)
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 0 <= max_bytes <= MAX_FILE_BYTES:
+            raise InvalidUpstreamResponse(_MESSAGE)
+        try:
+            async with client.stream("GET", safe_url, follow_redirects=False, timeout=30.0,
+                                    headers={"User-Agent": "Mozilla/5.0 (compatible; urfu-mcp)", "Accept": "*/*"}) as response:
+                if response.status_code != 200:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                raw_size = response.headers.get("content-length")
+                if raw_size is not None and raw_size.isascii() and raw_size.isdecimal() and int(raw_size) > max_bytes:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > max_bytes:
+                        raise InvalidUpstreamResponse(_MESSAGE)
+                    body.extend(chunk)
+                return bytes(body)
+        except InvalidUpstreamResponse:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize untrusted upstream failures
+            raise InvalidUpstreamResponse(_MESSAGE) from None
 
     async def fetch_file_metadata(self, client: httpx.AsyncClient, url: str) -> dict[str, str | int | None]:
         safe_url = self._safe_file_url(url)

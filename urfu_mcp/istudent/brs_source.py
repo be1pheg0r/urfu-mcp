@@ -113,11 +113,19 @@ class IStudentBRSPageSource:
             if not selected:
                 raise InvalidUpstreamResponse("BRS selected period disagrees with request")
         outers = [n for n in tree.root.descendants() if "discipline-outer-container" in n.classes()]
-        if not 0 < len(outers) <= _MAX_SUBJECTS:
+        rows = [n for n in tree.root.descendants() if "discipline" in n.classes()]
+        if not 0 < len(rows) <= _MAX_SUBJECTS or len(outers) != len(rows):
             raise InvalidUpstreamResponse("BRS subject count is unverified")
         ids = []
-        for outer in outers:
-            row = _single([n for n in outer.children if "discipline" in n.classes()])
+        for row in rows:
+            if sum(row in outer.children for outer in outers) != 1:
+                raise InvalidUpstreamResponse("BRS row container is unrecognized")
+            _single([n for n in row.children if n.tag == "a" and "discipline-header" in n.classes()])
+            trigger = _single(
+                [n for n in row.children if n.tag == "div" and "discipline-shutter" in n.classes()]
+            )
+            if not trigger.closed:
+                raise InvalidUpstreamResponse("BRS detail trigger is truncated")
             value = row.attrs.get("data-id", "")
             if not re.fullmatch(r"\d{1,16}", value) or value in ids:
                 raise InvalidUpstreamResponse("BRS discipline identifier is untrusted")

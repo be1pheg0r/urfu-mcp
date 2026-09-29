@@ -29,3 +29,7 @@ schedule:
   timezone: Asia/Yekaterinburg
   max_days: 14
   max_subjects: 3
+
+elearn:
+  # Каталог сохранения файлов курса; null использует ~/.urfu-mcp/files.
+  files_directory: null
