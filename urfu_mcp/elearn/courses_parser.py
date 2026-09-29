@@ -219,6 +219,8 @@ class CoursePageParser:
                     parsed = urlsplit(href)
                     if parsed.scheme.lower() in {"http", "https"}:
                         url = href
+                    elif not parsed.scheme and not parsed.netloc and href.startswith("/"):
+                        url = "https://elearn.urfu.ru" + href
                 except ValueError:
                     pass
                 restricted = any(n.classes() & {"restricted", "locked"} for n in descendants) or any(

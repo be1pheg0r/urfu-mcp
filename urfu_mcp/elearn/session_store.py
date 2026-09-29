@@ -197,8 +197,14 @@ def _validate(record: ELearnSessionRecord, *, now: float) -> None:
         raise ELearnSessionStoreError("eLearn sesskey is invalid")
     if record.username is not None and (not isinstance(record.username, str) or len(record.username) > 512):
         raise ELearnSessionStoreError("eLearn username is invalid")
-    if not isinstance(record.expires_at, (int, float)) or isinstance(record.expires_at, bool) or not math.isfinite(record.expires_at) or record.expires_at <= now:
+    # expires_at <= 0 means "no local expiry". The session is re-verified against
+    # eLearn on every use, so a dead cookie is rejected at use time rather than
+    # by a local clock, which only forced needless re-authentication.
+    if (not isinstance(record.expires_at, (int, float)) or isinstance(record.expires_at, bool)
+            or not math.isfinite(record.expires_at) or record.expires_at < 0):
         raise ELearnSessionStoreError("eLearn session expiry is invalid")
+    if 0 < record.expires_at <= now:
+        raise ELearnSessionStoreError("eLearn session is expired")
     try:
         parsed = urlsplit(record.origin)
         valid_origin = parsed.scheme == "https" and parsed.netloc == "elearn.urfu.ru" and not parsed.path and not parsed.query and not parsed.fragment

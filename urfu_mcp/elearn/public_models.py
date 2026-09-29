@@ -47,6 +47,16 @@ class CourseMaterial(CourseActivity):
     file_size: str | None = None
 
 
+class CourseFile(ELearnModel):
+    display_name: str = Field(min_length=1, max_length=500)
+    file_name: str = Field(min_length=1, max_length=500)
+    mime_type: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+    modified_date: str | None = None
+    download_url: str = Field(min_length=1, max_length=4000)
+    section_name: str = Field(max_length=300)
+
+
 class CourseForum(CourseActivity):
     discussion_count: int | None = Field(default=None, ge=0)
 
@@ -96,4 +106,13 @@ def public_course_content_payload(content: CourseContent, *, selector: str, as_o
     }
 
 
-__all__ = ["CourseActivity", "CourseAssignment", "CourseContent", "CourseForum", "CourseMaterial", "CourseQuiz", "CourseSection", "CourseSummary", "public_course_content_payload", "public_courses_payload"]
+def public_course_files_payload(files: tuple[CourseFile, ...], *, selector: str) -> dict[str, object]:
+    return {
+        "selector": selector,
+        "file_count": len(files),
+        "files": [item.model_dump(mode="json", exclude_none=True) for item in files],
+        "source": "elearn_moodle",
+    }
+
+
+__all__ = ["CourseActivity", "CourseAssignment", "CourseContent", "CourseFile", "CourseForum", "CourseMaterial", "CourseQuiz", "CourseSection", "CourseSummary", "public_course_content_payload", "public_course_files_payload", "public_courses_payload"]

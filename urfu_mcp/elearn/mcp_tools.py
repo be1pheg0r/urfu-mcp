@@ -15,7 +15,11 @@ from .errors import (
     NotAuthenticated,
     SessionUnavailable,
 )
-from .public_models import public_course_content_payload, public_courses_payload
+from .public_models import (
+    public_course_content_payload,
+    public_course_files_payload,
+    public_courses_payload,
+)
 from .reader import ELearnCourseReaderPort, local_today
 
 
@@ -69,6 +73,20 @@ def register_elearn_tools(
         except Exception:  # noqa: BLE001 - sanitize private provider/reader failures
             raise ToolError("The eLearn request could not be completed safely") from None
 
+    async def retrieve_course_files(course: str) -> dict[str, object]:
+        try:
+            if not isinstance(course, str) or not course.strip():
+                raise ToolError("course must not be blank")
+            _, session = await context()
+            files = await reader.read_files(cast(httpx.AsyncClient, session), course)  # type: ignore[union-attr]
+            return public_course_files_payload(files, selector=course)
+        except ELearnError as error:
+            raise ToolError(str(error)) from None
+        except ToolError:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize private provider/reader failures
+            raise ToolError("The eLearn request could not be completed safely") from None
+
     server.add_tool(
         retrieve_courses_list,
         name="retrieve_courses_list",
@@ -81,6 +99,13 @@ def register_elearn_tools(
         name="retrieve_course_content",
         description=("Retrieve one enrolled course's sections and activities. The course argument accepts either the numeric "
                      "course_id from retrieve_courses_list or the exact course name; ambiguous names fail."),
+        structured_output=True,
+    )
+    server.add_tool(
+        retrieve_course_files,
+        name="retrieve_course_files",
+        description=("List downloadable files for one enrolled course with metadata and direct links; file contents are never returned. "
+                     "The course argument accepts a course_id or exact course name."),
         structured_output=True,
     )
 

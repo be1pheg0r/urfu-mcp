@@ -26,11 +26,27 @@ _COURSE_PATH = re.compile(r"/course/view\.php\Z")
 _COURSE_ID = re.compile(r"\d+\Z")
 
 
+_MODULE_VIEW_PATHS = frozenset({"/mod/resource/view.php", "/mod/folder/view.php"})
+_ALLOWED_SESSION_PATHS = (
+    ELEAN_MY_COURSES_PATH,
+    "/lib/ajax/service.php",
+    "/pluginfile.php/",
+)
+
+
 def _valid_session_url(url: httpx.URL) -> bool:
-    """Allow protected Moodle paths only on the exact HTTPS origin."""
+    """Allow protected Moodle paths only on the exact HTTPS origin.
+
+    The file paths are narrow on purpose: only the two module views the file
+    reader follows and Moodle's own pluginfile download endpoint, all still
+    constrained to this one host.
+    """
     return (
         url.scheme == "https" and url.host == ELEAN_HOST and url.port in (None, 443)
-        and (url.path == ELEAN_MY_COURSES_PATH or url.path == "/lib/ajax/service.php" or url.path.startswith("/course/view.php"))
+        and (url.path in _ALLOWED_SESSION_PATHS
+             or url.path in _MODULE_VIEW_PATHS
+             or url.path.startswith("/course/view.php")
+             or url.path.startswith("/pluginfile.php/"))
         and not url.username and not url.password and not url.fragment
     )
 
@@ -131,8 +147,10 @@ class StoredELearnSessionProvider:
             record = self._store.load(identity)  # type: ignore[attr-defined]
             if record is None:
                 raise ELearnSessionStoreError("Stored eLearn session is unavailable")
-            # Revalidate time at use, even if the supplied store is not our implementation.
-            if record.expires_at <= self._now():
+            # Revalidate time at use, even if the supplied store is not our
+            # implementation. 0 means no local expiry; the protected page check
+            # below is what actually decides whether the session still works.
+            if 0 < record.expires_at <= self._now():
                 raise ELearnSessionStoreError("Stored eLearn session is invalid or expired")
             cookies = httpx.Cookies()
             cookies.set("MoodleSession", record.moodle_session_id, domain=ELEAN_HOST, path="/")

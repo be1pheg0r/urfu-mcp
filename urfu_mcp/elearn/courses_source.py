@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Protocol
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 import httpx
 
@@ -92,6 +93,84 @@ class ELearnCoursesSource:
         if isinstance(course_id, bool) or not isinstance(course_id, int) or course_id <= 0:
             raise InvalidUpstreamResponse(_MESSAGE)
         return await self._get(client, ELEAN_ORIGIN + COURSE_PATH + "?id=" + str(course_id))
+
+    @staticmethod
+    def _safe_url(url: str, *, path: str) -> str:
+        try:
+            parsed = urlsplit(urljoin(ELEAN_ORIGIN + "/", url))
+            decoded_parts = [unquote(part) for part in parsed.path.split("/")]
+            if (
+                parsed.scheme != "https" or parsed.netloc != "elearn.urfu.ru"
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or parsed.path != path
+                or any(part in {".", ".."} or "/" in part or "\\" in part for part in decoded_parts)
+            ):
+                raise InvalidUpstreamResponse(_MESSAGE)
+            query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if len(query) != 1 or query[0][0] != "id" or not query[0][1].isascii() or not query[0][1].isdecimal():
+                raise InvalidUpstreamResponse(_MESSAGE)
+            return parsed.geturl()
+        except (TypeError, ValueError):
+            raise InvalidUpstreamResponse(_MESSAGE) from None
+
+    @staticmethod
+    def _safe_file_url(url: str) -> str:
+        try:
+            parsed = urlsplit(urljoin(ELEAN_ORIGIN + "/", url))
+            decoded_parts = [unquote(part) for part in parsed.path.split("/")]
+            if (
+                parsed.scheme != "https" or parsed.netloc != "elearn.urfu.ru"
+                or parsed.username is not None or parsed.password is not None or parsed.fragment
+                or not parsed.path.startswith("/pluginfile.php/")
+                or any(part in {".", ".."} or "/" in part or "\\" in part for part in decoded_parts)
+                or len(parsed.path) > 2000
+            ):
+                raise InvalidUpstreamResponse(_MESSAGE)
+            query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if query not in ([], [("forcedownload", "1")], [("forcedownload", "0")]):
+                raise InvalidUpstreamResponse(_MESSAGE)
+            return parsed.geturl()
+        except (TypeError, ValueError):
+            raise InvalidUpstreamResponse(_MESSAGE) from None
+
+    async def fetch_module(self, client: httpx.AsyncClient, url: str) -> str | None:
+        safe_url = self._safe_url(url, path="/mod/resource/view.php")
+        try:
+            async with client.stream("GET", safe_url, follow_redirects=False, timeout=10.0,
+                                    headers={"User-Agent": "Mozilla/5.0 (compatible; urfu-mcp)", "Accept": "text/html"}) as response:
+                if response.status_code != 303:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                location = response.headers.get("location")
+                if location is None:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                return self._safe_file_url(urljoin(safe_url, location))
+        except InvalidUpstreamResponse:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize upstream failures
+            raise InvalidUpstreamResponse(_MESSAGE) from None
+
+    async def fetch_folder(self, client: httpx.AsyncClient, url: str) -> str:
+        safe_url = self._safe_url(url, path="/mod/folder/view.php")
+        return await self._get(client, safe_url)
+
+    async def fetch_file_metadata(self, client: httpx.AsyncClient, url: str) -> dict[str, str | int | None]:
+        safe_url = self._safe_file_url(url)
+        try:
+            async with client.stream("GET", safe_url, follow_redirects=False, timeout=10.0,
+                                    headers={"User-Agent": "Mozilla/5.0 (compatible; urfu-mcp)", "Accept": "*/*"}) as response:
+                if response.status_code != 200:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                mime_type = response.headers.get("content-type", "").split(";", maxsplit=1)[0].strip().lower() or None
+                raw_size = response.headers.get("content-length")
+                size = int(raw_size) if raw_size is not None and raw_size.isascii() and raw_size.isdecimal() else None
+                if size is not None and size > 2_000_000_000:
+                    raise InvalidUpstreamResponse(_MESSAGE)
+                modified = response.headers.get("last-modified")
+                return {"mime_type": mime_type, "size_bytes": size, "modified_date": modified}
+        except InvalidUpstreamResponse:
+            raise
+        except Exception:  # noqa: BLE001 - sanitize untrusted upstream failures
+            raise InvalidUpstreamResponse(_MESSAGE) from None
 
 
 __all__ = ["COURSE_PATH", "ELEAN_ORIGIN", "MAX_COURSES", "MY_COURSES_PATH", "ELearnCoursesSource", "ELearnPageSource"]

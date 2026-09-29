@@ -564,7 +564,9 @@ def run_elearn_login(
             modeus_person_id=person_id,
             moodle_session_id=cookies["MoodleSession"],
             sesskey=cookies.get("MDL_SSP_SessID"),
-            expires_at=time.time() + 900,
+            # No local expiry: every use re-checks the protected page, so a dead
+            # session is caught there. A local clock only forced re-login.
+            expires_at=0.0,
         )
         create_elearn_session_store().save(record)
     except Exception as error:  # noqa: BLE001 - backend details may contain secrets
