@@ -1115,26 +1115,17 @@ def _wait_and_fill_saved_credentials(
                     "Saved sign-in reached an unsupported eLearn identity-provider page"
                 )
             link.click()
-            # The broker click leads either to the ADFS form or, when a live
-            # Keycloak SSO session already exists, straight back to eLearn.
-            # Accept both instead of requiring the form to appear.
-            adfs_form_seen = False
-            give_up_at = time.monotonic() + 25.0
-            while True:
-                if page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
-                    if page.locator("form#loginForm input[name='UserName']").count():
-                        adfs_form_seen = True
-                        break
-                elif _is_elearn_course_page(page.url):
-                    break
-                if time.monotonic() >= give_up_at:
-                    break
-                page.wait_for_timeout(500)
-            if not adfs_form_seen and not _is_elearn_course_page(page.url):
-                print(f"eLearn after broker click: {_page_location(page)} adfs_form=missing")
-                raise ModeusAuthenticationError(
-                    "Saved sign-in did not reach the URFU sign-in form"
-                )
+            try:
+                page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
+                page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+            except timeout_error:
+                # A live Keycloak SSO session returns straight to eLearn instead
+                # of showing the ADFS form.
+                if not _is_elearn_course_page(page.url):
+                    print(f"eLearn after broker click: {_page_location(page)} adfs_form=missing")
+                    raise ModeusAuthenticationError(
+                        "Saved sign-in did not reach the URFU sign-in form"
+                    ) from None
         elif istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
             try:
                 page.wait_for_url(
@@ -1150,8 +1141,16 @@ def _wait_and_fill_saved_credentials(
                     "Saved sign-in could not verify the official iStudent federation link"
                 )
             link.click()
-            page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
-            page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+            try:
+                page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
+                page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
+            except timeout_error:
+                # A live Keycloak SSO session returns straight to iStudent
+                # instead of showing the ADFS form.
+                if not page.url.startswith("https://istudent.urfu.ru/"):
+                    raise ModeusAuthenticationError(
+                        "Saved sign-in did not reach the URFU sign-in form"
+                    ) from None
         elif istudent_flow and _is_keys_identity_provider_page(page):
             raise ModeusAuthenticationError(
                 "Saved sign-in reached an unsupported iStudent identity-provider page"
@@ -1174,8 +1173,10 @@ def _wait_and_fill_saved_credentials(
             "Saved sign-in could not find the verified URFU password form; "
             "use browser sign-in if an additional step is required"
         ) from None
-    # Nothing to fill when eLearn was already signed in by an existing Keycloak
-    # session: the protected page is reachable and no password form exists.
+    # Nothing to fill when iStudent or eLearn was already signed in by an
+    # existing Keycloak session: no password form exists on that page.
+    if istudent_flow and page.url.startswith("https://istudent.urfu.ru/"):
+        return
     if elearn_flow and _is_elearn_course_page(page.url):
         return
     if not _fill_saved_credentials(page, credentials):
