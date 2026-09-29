@@ -1115,12 +1115,26 @@ def _wait_and_fill_saved_credentials(
                     "Saved sign-in reached an unsupported eLearn identity-provider page"
                 )
             link.click()
-            try:
-                page.wait_for_url("https://sso.urfu.ru/adfs/ls/**", timeout=25_000)
-                page.wait_for_selector("form#loginForm input[name='UserName']", timeout=15_000)
-            except timeout_error:
+            # The broker click leads either to the ADFS form or, when a live
+            # Keycloak SSO session already exists, straight back to eLearn.
+            # Accept both instead of requiring the form to appear.
+            adfs_form_seen = False
+            give_up_at = time.monotonic() + 25.0
+            while True:
+                if page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
+                    if page.locator("form#loginForm input[name='UserName']").count():
+                        adfs_form_seen = True
+                        break
+                elif _is_elearn_course_page(page.url):
+                    break
+                if time.monotonic() >= give_up_at:
+                    break
+                page.wait_for_timeout(500)
+            if not adfs_form_seen and not _is_elearn_course_page(page.url):
                 print(f"eLearn after broker click: {_page_location(page)} adfs_form=missing")
-                raise
+                raise ModeusAuthenticationError(
+                    "Saved sign-in did not reach the URFU sign-in form"
+                )
         elif istudent_flow and not _trusted_istudent_keycloak_authorization(page) and not page.url.startswith("https://sso.urfu.ru/adfs/ls/"):
             try:
                 page.wait_for_url(
