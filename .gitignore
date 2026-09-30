@@ -234,3 +234,9 @@ config.yaml
 
 # RTK helper instructions
 RTK.md
+
+# Legacy .NET sidecar checkout; the submodule was removed and it is not part of the project.
+api/modeus/SfeduSchedule/
+
+# Private synthetic integration harness; intentionally excluded from release exports.
+/tests/e2e/
