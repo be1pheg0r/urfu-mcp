@@ -63,14 +63,35 @@ class ModeusDirectClient:
         embedded = response.get("_embedded") if isinstance(response, dict) else None
         people = embedded.get("persons") if isinstance(embedded, dict) else None
         page = response.get("page") if isinstance(response, dict) else None
-        if not isinstance(people, list) or not isinstance(page, dict):
+        if not isinstance(page, dict):
             raise InvalidUpstreamResponse("Modeus returned an invalid person-search response")
-        number, total_pages, total_elements = (page.get(k) for k in ("number", "totalPages", "totalElements"))
-        size = page.get("size")
-        if any(type(x) is not int or x < 0 for x in (number, total_pages, total_elements)) or size != page_size or number != page_number:
+
+        # Observed live on 2026-09-30: when nothing matches, Modeus omits the
+        # `persons` collection entirely (leaving only `students: []`) and
+        # reports page.number as 1 rather than the requested 0. An absent
+        # collection therefore means "no matches", not a broken response, and
+        # the empty result is recognised from the totals rather than from the
+        # echoed page index.
+        if people is None:
+            people = []
+        if not isinstance(people, list):
+            raise InvalidUpstreamResponse("Modeus returned an invalid person-search response")
+        number, total_pages, total_elements, reported_size = (
+            page.get(k) for k in ("number", "totalPages", "totalElements", "size")
+        )
+        if any(type(x) is not int or x < 0 for x in (number, total_pages, total_elements)):
+            raise InvalidUpstreamResponse("Modeus returned invalid person page metadata")
+
+        if total_elements == 0 and not people:
+            return {"items": [], "page": {"number": 0, "totalPages": 0, "totalElements": 0}}
+
+        # Verified live on 2026-09-30: page.size always echoes the requested
+        # page size, and page.number echoes the requested index for non-empty
+        # results, so both are checked strictly.
+        if reported_size != page_size or number != page_number:
             raise InvalidUpstreamResponse("Modeus returned invalid person page metadata")
         expected = ceil(total_elements / page_size) if total_elements else 0
-        if total_pages != expected or len(people) > page_size or (total_pages == 0 and (number != 0 or people)) or (total_pages and number >= total_pages):
+        if total_pages != expected or len(people) > page_size or (total_pages == 0 and people) or (total_pages and number >= total_pages):
             raise InvalidUpstreamResponse("Modeus person page totals are inconsistent")
         items = []
         for person in people:

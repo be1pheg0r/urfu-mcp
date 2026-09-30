@@ -7,12 +7,46 @@ from datetime import date
 from typing import Protocol
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from .authorization import ResolvedPersonAuthorizer
-from .errors import AmbiguousPerson, Forbidden, NotAuthenticated
+from .errors import (
+    AmbiguousPerson,
+    Forbidden,
+    NotAuthenticated,
+    PersonNotFound,
+    SfeduGatewayError,
+)
 from .intervals import DateInterval, local_date_interval
 from .models import ScheduleResult
 from .reader import ScheduleReader
+
+
+class _ToolFailure(RuntimeError):
+    """Internal marker so a safe message can be re-raised as an MCP ToolError."""
+
+
+def _as_tool_error(exc: BaseException) -> ToolError:
+    """Convert an expected domain failure into a message the model can read.
+
+    The MCP SDK reports any non-ToolError exception as a generic
+    "Error executing tool <name>" and drops the original text, so a mistyped
+    person name would reach the model as an unexplained crash. Only known
+    domain errors are converted; their messages are written to be safe.
+    """
+    if isinstance(exc, PersonNotFound):
+        return ToolError("No person matched that name. Check the spelling, or search a "
+                         "surname/first-name fragment.")
+    if isinstance(exc, NotAuthenticated):
+        return ToolError("Not signed in to Modeus, or the session expired. Run "
+                         "`urfu-mcp auth` and try again.")
+    if isinstance(exc, Forbidden):
+        return ToolError(str(exc))
+    if isinstance(exc, SfeduGatewayError):
+        return ToolError(f"Modeus could not complete the request: {exc}")
+    if isinstance(exc, ValueError):
+        return ToolError(str(exc))
+    return ToolError("The request could not be completed.")
 
 
 class CurrentIdentityProvider(Protocol):
@@ -122,9 +156,12 @@ def register_schedule_tools(
         period_end: str | None = None,
     ) -> dict[str, object]:
         """Retrieve the authenticated current user's complete schedule."""
-        identity, token = await identity_and_token()
-        interval = _interval(date, period_start, period_end, timezone_name)
-        schedules = await reader.read([identity], interval, token=token)
+        try:
+            identity, token = await identity_and_token()
+            interval = _interval(date, period_start, period_end, timezone_name)
+            schedules = await reader.read([identity], interval, token=token)
+        except (SfeduGatewayError, ValueError) as exc:
+            raise _as_tool_error(exc) from exc
         return _schedule_payload(schedules, multiple=False)
 
     async def retrieve_person_schedule(
@@ -137,6 +174,23 @@ def register_schedule_tools(
         person_selections: list[str] | None = None,
     ) -> dict[str, object]:
         """Retrieve schedules for people explicitly resolved from a complete search."""
+        try:
+            return await _resolve_and_read(
+                date, period_start, period_end, person, persons,
+                person_selection, person_selections,
+            )
+        except (SfeduGatewayError, ValueError) as exc:
+            raise _as_tool_error(exc) from exc
+
+    async def _resolve_and_read(
+        date: str | None,
+        period_start: str | None,
+        period_end: str | None,
+        person: str | None,
+        persons: list[str] | None,
+        person_selection: str | None,
+        person_selections: list[str] | None,
+    ) -> dict[str, object]:
         identity, token = await identity_and_token()
         interval = _interval(date, period_start, period_end, timezone_name)
         if (person is None) == (persons is None):

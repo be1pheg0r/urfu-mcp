@@ -45,10 +45,26 @@ class ScheduleNormalizer:
             embedded = {}
         if not isinstance(embedded, Mapping):
             raise InvalidUpstreamResponse("_embedded must be an object")
+        page = payload.get("page")
+        if not isinstance(page, Mapping):
+            raise InvalidUpstreamResponse("response must contain page metadata")
+        total_elements = page.get("totalElements")
+        total_pages = page.get("totalPages")
+        # Observed live on 2026-09-30: when a person has no events in the
+        # interval, Modeus omits the `events` collection entirely and reports
+        # totalElements/totalPages as 0. An absent collection therefore means
+        # "no events", not a malformed response, so the empty result is
+        # recognised from the page totals rather than from the key's presence.
+        if total_elements == 0 and total_pages == 0 and "events" not in embedded and "events" not in payload:
+            return ScheduleResult(
+                requested_person_id=requested_person_id,
+                from_=from_,
+                to=to,
+                events=[],
+            )
         events_data = payload.get("events") if "events" in payload else embedded.get("events")
         if not isinstance(events_data, list):
             raise InvalidUpstreamResponse("response must contain an events list")
-        page = payload.get("page")
         cls._validate_page(page, len(events_data))
 
         try:

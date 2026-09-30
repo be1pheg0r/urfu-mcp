@@ -1282,7 +1282,7 @@ wheels = [
 
 [[package]]
 name = "urfu-mcp"
-version = "0.1.0"
+version = "0.2.20260930"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },

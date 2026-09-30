@@ -77,6 +77,7 @@ class PersonResolver:
             elif (total_pages, total_elements) != (expected_pages, expected_elements):
                 raise InvalidUpstreamResponse("person page metadata changed during pagination")
             received_count += len(page_items)
+            new_candidates = 0
             for raw_candidate in page_items:
                 try:
                     parsed = PersonCandidate.model_validate(raw_candidate)
@@ -85,7 +86,16 @@ class PersonResolver:
                 previous = candidates.get(parsed.person_id)
                 if previous is not None and previous != parsed:
                     raise InvalidUpstreamResponse("duplicate person ID has conflicting candidate data")
-                candidates.setdefault(parsed.person_id, parsed)
+                if previous is None:
+                    candidates[parsed.person_id] = parsed
+                    new_candidates += 1
+            # Observed live on 2026-09-30: Modeus returns the page-0 records for
+            # a requested page 1, so a page that contributes nothing new means
+            # upstream is not advancing. Silently deduplicating it would claim a
+            # complete search that silently dropped records, so fail closed. The
+            # final page is exempt: nothing beyond it is expected.
+            if page_number and page_number + 1 < total_pages and not new_candidates:
+                raise IncompleteResult("person search pagination did not advance")
             if page_number + 1 >= total_pages:
                 if received_count != total_elements:
                     raise IncompleteResult("person search page metadata claims a different result count")
