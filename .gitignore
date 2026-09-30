@@ -222,21 +222,24 @@ __marimo__/
 .gitignore
 
 # All AI stuff has to be ignored
-.codex/
-docs/design/
 .claude/
 .cao/
 
-**/AGENTS.md
 
 # Project Ignors
 config.yaml
 
 # RTK helper instructions
-RTK.md
 
 # Legacy .NET sidecar checkout; the submodule was removed and it is not part of the project.
 api/modeus/SfeduSchedule/
 
 # Private synthetic integration harness; intentionally excluded from release exports.
-/tests/e2e/
+
+# Development-only paths intentionally excluded from public releases.
+.github/
+docs/
+.pre-commit-config.yaml
+tests/
+scripts/run_pytest.py
+scripts/make-prerelease.sh
